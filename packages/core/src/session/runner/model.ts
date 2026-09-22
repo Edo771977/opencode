@@ -9,6 +9,7 @@ import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
 import { Context, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
 import { Catalog } from "../../catalog"
+import { Config } from "../../config"
 import { Credential } from "../../credential"
 import { Integration } from "../../integration"
 import { ModelV2 } from "../../model"
@@ -186,6 +187,7 @@ export const locationLayer = Layer.effect(
   Effect.gen(function* () {
     const catalog = yield* Catalog.Service
     const integrations = yield* Integration.Service
+    const config = yield* Config.Service
     // Location plugins populate and filter the catalog asynchronously during layer startup.
     const select = Effect.fn("SessionRunnerModel.select")(function* (session: SessionSchema.Info) {
       if (session.model)
@@ -196,11 +198,21 @@ export const locationLayer = Layer.effect(
       if (defaultModel && supported(defaultModel)) return defaultModel
       return (yield* catalog.model.available()).find(supported)
     })
+    const configured = Effect.fn("SessionRunnerModel.configuredSmall")(function* () {
+      const ref = Config.latest(yield* config.entries(), "small_model")
+      if (ref === undefined) return undefined
+      const parsed = ModelV2.parse(ref)
+      return (yield* catalog.model.available()).find(
+        (model) => model.providerID === parsed.providerID && model.id === parsed.modelID,
+      )
+    })
     const resolveSmallModel = Effect.fn("SessionRunnerModel.resolveSmall")(function* (session: SessionSchema.Info) {
       const selected = yield* select(session)
       if (!selected) return undefined
-      const small = yield* catalog.model.small(selected.providerID)
-      if (!small || !supported(small)) return undefined
+      // An explicitly configured `small_model` outranks the catalog's heuristic pick: the user named
+      // a model, and silently running a different one is worse than not running a small model at all.
+      const small = (yield* configured()) ?? (yield* catalog.model.small(selected.providerID))
+      if (!small || !supported(small) || !small.capabilities.tools) return undefined
       if (small.id === selected.id) return undefined
       const provider = yield* catalog.provider.get(small.providerID)
       const connection = yield* integrations.connection.active(
@@ -236,4 +248,8 @@ export const locationLayer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Catalog.node, Integration.node] })
+export const node = makeLocationNode({
+  service: Service,
+  layer: locationLayer,
+  deps: [Catalog.node, Integration.node, Config.node],
+})

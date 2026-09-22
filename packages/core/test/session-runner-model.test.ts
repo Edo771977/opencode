@@ -3,7 +3,14 @@ import { LLM } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
 import { DateTime, Effect, Layer } from "effect"
 import { Headers } from "effect/unstable/http"
+import { Catalog } from "@opencode-ai/core/catalog"
+import { Config } from "@opencode-ai/core/config"
 import { Credential } from "@opencode-ai/core/credential"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { EventV2 } from "@opencode-ai/core/event"
+import { Location } from "@opencode-ai/core/location"
+import { Policy } from "@opencode-ai/core/policy"
 import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -11,6 +18,7 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { location } from "./fixture/location"
 import { it, testEffect } from "./lib/effect"
 
 type Api =
@@ -347,6 +355,8 @@ describe("SessionRunnerModel", () => {
 })
 
 describe("SessionRunnerModel.resolveSmall", () => {
+  const providerID = ProviderV2.ID.make("test-provider")
+  const sessionModel = ModelV2.ID.make("session-model")
   const session = SessionV2.Info.make({
     id: SessionV2.ID.make("ses_small"),
     projectID: ProjectV2.ID.global,
@@ -355,41 +365,114 @@ describe("SessionRunnerModel.resolveSmall", () => {
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
     location: { directory: AbsolutePath.make("/project") },
+    model: { providerID, id: sessionModel },
   })
 
+  // Exercises the real location layer rather than an injected resolver: the interesting behaviour
+  // (configured model wins, tool-less models are skipped, nothing here fails a turn) lives in it.
+  let configuredSmall: string | undefined = undefined
   const smallIt = testEffect(
-    Layer.succeed(
-      SessionRunnerModel.Service,
-      SessionRunnerModel.Service.of({
-        resolve: () => Effect.succeed({} as never),
-        resolveSmall: () => Effect.succeed(undefined),
-      }),
+    AppNodeBuilder.build(
+      LayerNode.group([
+        SessionRunnerModel.node,
+        Catalog.node,
+        EventV2.node,
+        Credential.node,
+        Integration.node,
+        Policy.node,
+      ]),
+      [
+        [
+          Location.node,
+          Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make("test") }))),
+        ],
+        [
+          Config.node,
+          Layer.succeed(
+            Config.Service,
+            Config.Service.of({
+              entries: () =>
+                Effect.succeed([
+                  new Config.Document({
+                    type: "document",
+                    info: Config.Info.make({
+                      ...(configuredSmall === undefined ? {} : { small_model: configuredSmall }),
+                    }),
+                  }),
+                ]),
+            }),
+          ),
+        ],
+      ],
     ),
   )
 
-  smallIt.effect("returns undefined when no small model is injected", () =>
+  const seed = Effect.fn("SessionRunnerModelTest.seed")(function* (
+    models: ReadonlyArray<{ id: string; tools: boolean; cost: number }>,
+  ) {
+    const catalog = yield* Catalog.Service
+    yield* catalog.transform((draft) => {
+      draft.provider.update(providerID, () => {})
+      for (const item of models) {
+        draft.model.update(providerID, ModelV2.ID.make(item.id), (model) => {
+          model.api = { id: ModelV2.ID.make(item.id), type: "aisdk", package: "@ai-sdk/anthropic" }
+          model.capabilities.tools = item.tools
+          model.capabilities.input = ["text"]
+          model.capabilities.output = ["text"]
+          model.cost = [{ input: item.cost, output: item.cost, cache: { read: 0, write: 0 } }]
+          model.time.released = Date.now()
+        })
+      }
+    })
+  })
+
+  smallIt.effect("prefers the configured small model over the catalog's pick", () =>
     Effect.gen(function* () {
-      const svc = yield* SessionRunnerModel.Service
-      const resolved = yield* svc.resolveSmall(session)
-      expect(resolved).toBeUndefined()
+      configuredSmall = `${providerID}/chosen-haiku`
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        { id: "cheap-mini", tools: true, cost: 1 },
+        { id: "chosen-haiku", tools: true, cost: 5 },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      expect(yield* models.resolveSmall(session)).toMatchObject({ id: "chosen-haiku" })
     }),
   )
 
-  const withSmall = testEffect(
-    Layer.succeed(
-      SessionRunnerModel.Service,
-      SessionRunnerModel.Service.of({
-        resolve: () => Effect.succeed({} as never),
-        resolveSmall: () => Effect.succeed({ id: "small-model" } as never),
-      }),
-    ),
+  smallIt.effect("falls back to the catalog when the configured small model is unknown", () =>
+    Effect.gen(function* () {
+      configuredSmall = `${providerID}/not-in-catalog`
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        { id: "cheap-mini", tools: true, cost: 1 },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      expect(yield* models.resolveSmall(session)).toMatchObject({ id: "cheap-mini" })
+    }),
   )
 
-  withSmall.effect("returns the injected small model when available", () =>
+  smallIt.effect("declines a small model that cannot call tools instead of failing the turn", () =>
     Effect.gen(function* () {
-      const svc = yield* SessionRunnerModel.Service
-      const resolved = yield* svc.resolveSmall(session)
-      expect(resolved).toMatchObject({ id: "small-model" })
+      configuredSmall = `${providerID}/toolless-mini`
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        { id: "toolless-mini", tools: false, cost: 1 },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      expect(yield* models.resolveSmall(session)).toBeUndefined()
+    }),
+  )
+
+  smallIt.effect("returns undefined when the provider offers no other model", () =>
+    Effect.gen(function* () {
+      configuredSmall = undefined
+      yield* seed([{ id: sessionModel, tools: true, cost: 20 }])
+
+      const models = yield* SessionRunnerModel.Service
+      expect(yield* models.resolveSmall(session)).toBeUndefined()
     }),
   )
 })

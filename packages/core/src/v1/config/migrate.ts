@@ -17,7 +17,8 @@ const keys = new Set([
   "autoshare",
   "disabled_providers",
   "enabled_providers",
-  "small_model",
+  // `small_model` is not listed: it is a V2 key too, with the same shape and meaning, so a file
+  // that uses it must not be pushed through the V1 parser on its account.
   "mode",
   "agent",
   "provider",
@@ -37,6 +38,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     $schema: info.$schema,
     shell: info.shell,
     model: info.model,
+    small_model: info.small_model,
     default_agent: info.default_agent,
     autoupdate: info.autoupdate,
     share: info.share ?? (info.autoshare ? "auto" : undefined),

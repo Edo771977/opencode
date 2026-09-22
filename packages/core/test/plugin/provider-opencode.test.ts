@@ -462,12 +462,14 @@ describe("OpencodePlugin", () => {
       yield* catalog.transform((catalog) => {
         catalog.provider.update(providerID, () => {})
         catalog.model.update(providerID, ModelV2.ID.make("cheap-mini"), (model) => {
+          model.capabilities.tools = true
           model.capabilities.input = ["text"]
           model.capabilities.output = ["text"]
           model.cost = [...cost(1, 1)]
           model.time.released = Date.now()
         })
         catalog.model.update(providerID, ModelV2.ID.make("gpt-5-nano"), (model) => {
+          model.capabilities.tools = true
           model.capabilities.input = ["text"]
           model.capabilities.output = ["text"]
           model.cost = [...cost(10, 10)]
