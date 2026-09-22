@@ -237,11 +237,18 @@ export const TaskParallelTool = Tool.define(
               run: runSubtask(p).pipe(Effect.onInterrupt(() => ops.cancel(p.session.id))),
             })
             const info = (yield* background.wait({ id: p.session.id })).info
-            if (info?.status === "error")
-              return { description: p.task.description, state: "error" as const, text: info.error ?? "Subtask failed" }
+            if (info?.status === "completed")
+              return { description: p.task.description, state: "completed" as const, text: info.output ?? "" }
             if (info?.status === "cancelled")
               return { description: p.task.description, state: "cancelled" as const, text: "Subtask cancelled" }
-            return { description: p.task.description, state: "completed" as const, text: info?.output ?? "" }
+            // Anything else is a subtask whose result we do not have: an error, a job that is somehow
+            // still running, or one missing from the registry. Reporting those as completed would tell
+            // the model the work is done and hand it an empty body to reason from.
+            return {
+              description: p.task.description,
+              state: "error" as const,
+              text: info?.error ?? `Subtask did not report a result (${info?.status ?? "no job"})`,
+            }
           }).pipe(Effect.onInterrupt(() => ops.cancel(p.session.id))),
         { concurrency: "unbounded" },
       )

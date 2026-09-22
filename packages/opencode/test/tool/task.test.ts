@@ -1249,6 +1249,103 @@ describe("tool.task-parallel", () => {
     }),
   )
 
+  it.instance("a subtask that dies does not take its siblings down with it", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      // The prompt layer turns its errors into defects, and a defect inside a concurrent forEach
+      // interrupts the sibling fibers. Running each subtask as its own job is what contains it.
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          input.parts.some((part) => part.type === "text" && part.text.includes("explode"))
+            ? Effect.die(new Error("prompt layer defect"))
+            : Effect.sync(() => reply(input, "finished")),
+      }
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            { description: "healthy one", prompt: "do the work", subagent_type: "general" },
+            { description: "broken one", prompt: "explode please", subagent_type: "general" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("- healthy one: COMPLETED")
+      expect(result.output).toContain("  finished")
+      expect(result.output).toContain("- broken one: ERROR")
+      expect(result.output).toContain("prompt layer defect")
+    }),
+  )
+
+  it.instance("cancelling the parent session cancels the fan-out children", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const runState = yield* SessionRunState.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const started = defer<string[]>()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: () => Effect.never,
+      }
+
+      const fiber = yield* def
+        .execute(
+          {
+            tasks: [
+              { description: "first", prompt: "wait here", subagent_type: "general" },
+              { description: "second", prompt: "wait here too", subagent_type: "general" },
+            ],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            // The tool publishes the child session ids before the subtasks finish, which is what
+            // lets anything outside the call reach them while they run.
+            metadata: (input) =>
+              Effect.sync(() => {
+                const sessions = input.metadata?.subtaskSessions
+                if (Array.isArray(sessions)) started.resolve(sessions as string[])
+              }),
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild)
+
+      const sessions = yield* Effect.promise(() => started.promise)
+      expect(sessions).toHaveLength(2)
+
+      yield* runState.cancel(chat.id)
+      const result = yield* Fiber.join(fiber)
+
+      for (const sessionID of sessions) {
+        expect((yield* jobs.get(sessionID))?.status).toBe("cancelled")
+      }
+      expect(result.output).toContain("- first: CANCELLED")
+      expect(result.output).toContain("- second: CANCELLED")
+    }),
+  )
+
   it.instance("execute fans out to one child session per subtask and denies nested fan-out", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
