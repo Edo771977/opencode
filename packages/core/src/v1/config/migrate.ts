@@ -56,12 +56,39 @@ const v1Shapes: Record<string, (value: unknown) => boolean> = {
     isRecord(value) && ["tail_turns", "preserve_recent_tokens", "reserved"].some((key) => Object.hasOwn(value, key)),
 }
 
+/**
+ * The V2 shape of those same keys, recognised positively. "Not the V1 shape" is not the same thing:
+ * it also describes values both shapes accept, and reading one of those as V2 drops whatever V2 has
+ * no place for.
+ */
+const v2Shapes: Record<string, (value: unknown) => boolean> = {
+  skills: (value) => Array.isArray(value),
+  // Servers live under `servers`, beside an optional `timeout`. A V1 file may name a server
+  // `servers` or `timeout`, and a server entry carries its own `type` — which is what tells the two
+  // readings apart when one of those two names is all that is there.
+  mcp: (value) =>
+    isRecord(value) &&
+    Object.keys(value).length > 0 &&
+    Object.keys(value).every((key) => key === "servers" || key === "timeout") &&
+    !Object.values(value).some((entry) => isRecord(entry) && Object.hasOwn(entry, "type")),
+  // The budgets V2 renamed. `auto` and `prune` are shared, so they say nothing on their own.
+  compaction: (value) => isRecord(value) && (Object.hasOwn(value, "keep") || Object.hasOwn(value, "buffer")),
+}
+
+// Guarded lookups: an own `__proto__` key in a parsed file would otherwise resolve to
+// `Object.prototype` and be called.
+const shapedV1 = (input: Record<string, unknown>, key: string) =>
+  Object.hasOwn(v1Shapes, key) && v1Shapes[key]?.(input[key]) === true
+
+const shapedV2 = (input: Record<string, unknown>, key: string) =>
+  Object.hasOwn(v2Shapes, key) && v2Shapes[key]?.(input[key]) === true
+
 export function isV1(input: unknown) {
   if (!isRecord(input)) return false
   const present = Object.keys(input)
   if (present.some((key) => keys.has(key))) return true
-  if (present.some((key) => v1Shapes[key]?.(input[key]) === true)) return true
-  if (present.some((key) => v2Keys.has(key))) return false
+  if (present.some((key) => shapedV1(input, key))) return true
+  if (present.some((key) => v2Keys.has(key) || shapedV2(input, key))) return false
   return present.some((key) => ambiguous.has(key))
 }
 
@@ -73,10 +100,11 @@ export function isV1(input: unknown) {
 export function mixed(input: unknown) {
   if (!isRecord(input)) return undefined
   const present = Object.keys(input)
-  const legacy = present.filter((key) => keys.has(key) || v1Shapes[key]?.(input[key]) === true)
-  // A key both shapes spell the same counts as current when its shape is not the V1 one: left in,
-  // the V1 parser rejects it and takes the rest of the file down with it.
-  const current = present.filter((key) => v2Keys.has(key) || (key in v1Shapes && v1Shapes[key]?.(input[key]) === false))
+  const legacy = present.filter((key) => keys.has(key) || shapedV1(input, key))
+  // A key both shapes spell the same counts as current only when it positively looks like the V2
+  // shape: left in, the V1 parser rejects it and takes the rest of the file down with it — but a
+  // value that parser reads perfectly well belongs to the half it can read.
+  const current = present.filter((key) => v2Keys.has(key) || shapedV2(input, key))
   if (!legacy.length || !current.length) return undefined
   return {
     legacy,

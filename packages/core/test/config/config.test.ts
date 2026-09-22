@@ -181,6 +181,38 @@ describe("Config", () => {
       const shared = ConfigMigrateV1.mixed({ agent: {}, mcp: { servers: {} }, skills: ["./s"] })
       expect(shared).toMatchObject({ legacy: ["agent"], current: ["mcp", "skills"] })
       expect(shared?.base).toEqual({ agent: {} })
+      // Only a positively V2 shape. A value the V1 parser reads is not a half-migrated file: saying
+      // it is warns about a migration nobody started, and hands the V2 reader a value it will drop.
+      for (const value of [
+        { compaction: { auto: false } },
+        { mcp: {} },
+        // A V1 server may be named `servers` or `timeout`; its own `type` is what gives it away.
+        { mcp: { timeout: { type: "remote", url: "https://example.test/mcp" } } },
+        { mcp: { servers: { type: "remote", url: "https://example.test/mcp" } } },
+      ])
+        expect(ConfigMigrateV1.mixed({ agent: {}, ...value })).toBeUndefined()
+    }),
+  )
+
+  it.effect("lets a shared key written in the current shape rule out the v1 reading", () =>
+    Effect.sync(() => {
+      // `small_model` alone leaves the V1 reading in place, and the V1 parser drops what it cannot
+      // read — here the servers and the compaction budget the file is entirely about.
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", mcp: { servers: { s: { type: "remote", url: "u" } } } })).toBe(
+        false,
+      )
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", compaction: { keep: { tokens: 5 } } })).toBe(false)
+      // A legacy key still decides it, and the shared key is then taken from the file as authored.
+      expect(ConfigMigrateV1.isV1({ agent: {}, skills: ["./s"] })).toBe(true)
+    }),
+  )
+
+  it.effect("survives a file with an own __proto__ key", () =>
+    Effect.sync(() => {
+      // Looking a key up in the shape tables by name would otherwise find `Object.prototype`.
+      const input = JSON.parse('{"__proto__":{"x":1},"agent":{}}')
+      expect(ConfigMigrateV1.isV1(input)).toBe(true)
+      expect(ConfigMigrateV1.mixed(input)).toBeUndefined()
       // One shape alone is not a mix, whichever it is.
       expect(ConfigMigrateV1.mixed({ agent: {} })).toBeUndefined()
       expect(ConfigMigrateV1.mixed({ agents: {} })).toBeUndefined()
