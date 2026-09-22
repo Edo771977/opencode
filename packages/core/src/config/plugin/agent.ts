@@ -31,6 +31,7 @@ type PathAction =
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
 const agentKeys = new Set([
   "model",
+  "small",
   "variant",
   "request",
   "system",

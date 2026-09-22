@@ -98,6 +98,7 @@ const client = Layer.succeed(
 )
 const model = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route })
 const replacementModel = Model.make({ id: "replacement", provider: "fake", route: OpenAIChat.route })
+const smallModel = Model.make({ id: "small-model", provider: "fake", route: OpenAIChat.route })
 const compactModel = Model.make({
   id: "compact",
   provider: "fake",
@@ -154,8 +155,10 @@ const echo = Layer.effectDiscard(
 const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: echo, deps: [ToolRegistry.node] })
 let modelResolveHook = Effect.void
 let currentModel = model
-const models = SessionRunnerModel.layerWith((session) =>
-  modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
+let currentSmall: Model | undefined = undefined
+const models = SessionRunnerModel.layerWith(
+  (session) => modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
+  () => Effect.succeed(currentSmall),
 )
 const systemContextKey = SystemContext.Key.make("test/context")
 let systemBaseline = "Initial context"
@@ -318,6 +321,7 @@ const setup = Effect.gen(function* () {
   systemLoadHook = Effect.void
   modelResolveHook = Effect.void
   currentModel = model
+  currentSmall = undefined
   skillBaselines.clear()
   responses = undefined
   streamFailure = undefined
@@ -769,6 +773,46 @@ describe("SessionRunnerLLM", () => {
       ).toHaveLength(1)
       yield* replaySessionProjection(sessionID)
       expect(yield* session.messages({ sessionID })).toHaveLength(3)
+    }),
+  )
+
+  it.effect("routes a small-model agent's turn to the small model and records it as the answering model", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const agent = yield* AgentV2.Service
+      yield* agent.transform((editor) =>
+        editor.update(AgentV2.ID.make("build"), (info) => {
+          info.mode = "primary"
+          info.small = true
+        }),
+      )
+      currentSmall = smallModel
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "text-small", ["Done"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }) })
+
+      expect(requests.at(-1)?.model).toBe(smallModel)
+      expect((yield* session.messages({ sessionID })).find((message) => message.type === "assistant")).toMatchObject({
+        model: { id: "small-model", providerID: "fake" },
+      })
+    }),
+  )
+
+  it.effect("keeps the session model when the agent opts in but no small model resolves", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const agent = yield* AgentV2.Service
+      yield* agent.transform((editor) =>
+        editor.update(AgentV2.ID.make("build"), (info) => {
+          info.mode = "primary"
+          info.small = true
+        }),
+      )
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "text-fallback", ["Done"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }) })
+
+      expect(requests.at(-1)?.model).toBe(model)
     }),
   )
 

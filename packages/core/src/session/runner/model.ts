@@ -186,17 +186,33 @@ export const locationLayer = Layer.effect(
   Effect.gen(function* () {
     const catalog = yield* Catalog.Service
     const integrations = yield* Integration.Service
+    // Location plugins populate and filter the catalog asynchronously during layer startup.
+    const select = Effect.fn("SessionRunnerModel.select")(function* (session: SessionSchema.Info) {
+      if (session.model)
+        return (yield* catalog.model.available()).find(
+          (model) => model.providerID === session.model?.providerID && model.id === session.model.id,
+        )
+      const defaultModel = yield* catalog.model.default()
+      if (defaultModel && supported(defaultModel)) return defaultModel
+      return (yield* catalog.model.available()).find(supported)
+    })
+    const resolveSmallModel = Effect.fn("SessionRunnerModel.resolveSmall")(function* (session: SessionSchema.Info) {
+      const selected = yield* select(session)
+      if (!selected) return undefined
+      const small = yield* catalog.model.small(selected.providerID)
+      if (!small || !supported(small)) return undefined
+      if (small.id === selected.id) return undefined
+      const provider = yield* catalog.provider.get(small.providerID)
+      const connection = yield* integrations.connection.active(
+        provider?.integrationID ?? Integration.ID.make(small.providerID),
+      )
+      // Skip `resolve`: a variant selected for the session model is not offered by a different
+      // model, and asking for it there fails the turn the small model was meant to make cheaper.
+      return yield* fromCatalogModel(small, connection ? yield* integrations.connection.resolve(connection) : undefined)
+    })
     return Service.of({
       resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session) {
-        // Location plugins populate and filter the catalog asynchronously during layer startup.
-        const defaultModel = session.model ? undefined : yield* catalog.model.default()
-        const selected = session.model
-          ? (yield* catalog.model.available()).find(
-              (model) => model.providerID === session.model?.providerID && model.id === session.model.id,
-            )
-          : defaultModel && supported(defaultModel)
-            ? defaultModel
-            : (yield* catalog.model.available()).find(supported)
+        const selected = yield* select(session)
         if (!selected && session.model)
           return yield* new ModelUnavailableError({
             providerID: session.model.providerID,
@@ -213,31 +229,9 @@ export const locationLayer = Layer.effect(
           connection ? yield* integrations.connection.resolve(connection) : undefined,
         )
       }),
-      resolveSmall: Effect.fn("SessionRunnerModel.resolveSmall")(function* (session) {
-        // Resolve the small model for the session's active provider, used for lightweight
-        // steps (title/status/confirmations) when the agent opts in via `small: true`.
-        const defaultModel = session.model ? undefined : yield* catalog.model.default()
-        const selected = session.model
-          ? (yield* catalog.model.available()).find(
-              (model) => model.providerID === session.model?.providerID && model.id === session.model.id,
-            )
-          : defaultModel && supported(defaultModel)
-            ? defaultModel
-            : (yield* catalog.model.available()).find(supported)
-        if (!selected) return undefined
-        const small = yield* catalog.model.small(selected.providerID)
-        if (!small || !supported(small)) return undefined
-        if (small.id === selected.id) return undefined
-        const provider = yield* catalog.provider.get(small.providerID)
-        const connection = yield* integrations.connection.active(
-          provider?.integrationID ?? Integration.ID.make(small.providerID),
-        )
-        return yield* resolve(
-          session,
-          small,
-          connection ? yield* integrations.connection.resolve(connection) : undefined,
-        )
-      }),
+      // Opting an agent into the small model must never cost it a turn: an unavailable, unsupported
+      // or unauthorized small model degrades to the session model instead of failing.
+      resolveSmall: (session) => resolveSmallModel(session).pipe(Effect.catchCause(() => Effect.succeed(undefined))),
     })
   }),
 )

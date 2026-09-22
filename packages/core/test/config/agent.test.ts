@@ -250,6 +250,7 @@ Review carefully.`,
             await fs.writeFile(
               path.join(tmp.path, "agents", "native.md"),
               `---
+small: true
 request:
   headers:
     x-agent: native
@@ -289,8 +290,11 @@ Use native v2 fields.`,
             permissions: [{ action: "edit", resource: "*", effect: "deny" }],
           })
           expect(yield* agents.get(AgentV2.ID.make("team/helper"))).toMatchObject({ system: "Help the team." })
+          // `small` must be a known v2 key: an unknown key sends the whole file down the legacy
+          // parser, which would swallow it into request.body and drop the permissions ruleset.
           expect(yield* agents.get(AgentV2.ID.make("native"))).toMatchObject({
             system: "Use native v2 fields.",
+            small: true,
             request: { headers: { "x-agent": "native" }, body: { effort: "high" } },
             permissions: [{ action: "edit", resource: "*", effect: "deny" }],
           })

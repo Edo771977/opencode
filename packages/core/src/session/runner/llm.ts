@@ -201,8 +201,11 @@ const layer = Layer.effect(
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
-      // Agent opted into a fast model for lightweight steps. Prefer the small model when one is
-      // available; fall back to the session model otherwise (never fail a turn for a missing small model).
+      // Agent opted into the provider's small model. Prefer it when one is available; fall back to
+      // the session model otherwise (resolveSmall never fails a turn for a missing small model).
+      // Everything downstream keys off `modelForStep`: history is serialized per model (reasoning
+      // signatures do not carry across models), the step event records who actually answered, and
+      // compaction sizes the context against the window the request will hit.
       const resolvedSmall = agent.info?.small ? yield* models.resolveSmall(session) : undefined
       const modelForStep = resolvedSmall ?? model
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
@@ -219,20 +222,26 @@ const layer = Layer.effect(
         system: [agent.info?.system, system.baseline]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        messages: [
+          ...toLLMMessages(context, modelForStep),
+          ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : []),
+        ],
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep ? "none" : undefined,
       })
-      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
+      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model: modelForStep, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()
       const publisher = createLLMEventPublisher(events, {
         sessionID: session.id,
         agent: agent.id,
         model: {
-          id: ModelV2.ID.make(model.id),
-          providerID: ProviderV2.ID.make(model.provider),
-          ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }),
+          id: ModelV2.ID.make(modelForStep.id),
+          providerID: ProviderV2.ID.make(modelForStep.provider),
+          // The variant belongs to the session model; the small model is resolved without one.
+          ...(resolvedSmall !== undefined || session.model?.variant === undefined
+            ? {}
+            : { variant: session.model.variant }),
         },
         snapshot: startSnapshot,
       })
@@ -294,7 +303,7 @@ const layer = Layer.effect(
             recoverOverflow &&
             !publisher.hasAssistantStarted() &&
             isContextOverflowFailure(overflowFailure ?? failure) &&
-            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
+            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model: modelForStep, request })))
           )
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
           if (overflowFailure) yield* publish(overflowFailure)
