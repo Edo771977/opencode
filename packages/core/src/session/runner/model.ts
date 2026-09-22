@@ -202,9 +202,13 @@ export const locationLayer = Layer.effect(
       const ref = Config.latest(yield* config.entries(), "small_model")
       if (ref === undefined) return undefined
       const parsed = ModelV2.parse(ref)
-      return (yield* catalog.model.available()).find(
+      const found = (yield* catalog.model.available()).find(
         (model) => model.providerID === parsed.providerID && model.id === parsed.modelID,
       )
+      // A `provider/model` that matches nothing is far more often a typo or a `#variant` suffix than
+      // a deliberate choice, and falling back to the catalog's own pick would hide it.
+      if (!found) yield* Effect.logWarning(`Configured small_model "${ref}" is not in the catalog; ignoring it`)
+      return found
     })
     const resolveSmallModel = Effect.fn("SessionRunnerModel.resolveSmall")(function* (session: SessionSchema.Info) {
       const selected = yield* select(session)
