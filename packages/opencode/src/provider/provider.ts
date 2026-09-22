@@ -1940,7 +1940,11 @@ const layer = Layer.effect(
       const cfg = yield* config.get()
 
       if (cfg.small_model) {
-        const parsed = parseModel(cfg.small_model)
+        // `provider/model#variant` is the form the model option takes, so it is the form people
+        // write here too. The variant names a setting of the model, not another model: looking one
+        // up under its full reference finds nothing and would silently leave the agent on the
+        // expensive model, which is the opposite of what was asked for.
+        const parsed = parseModel(cfg.small_model.split("#")[0])
         return yield* getModel(parsed.providerID, parsed.modelID).pipe(
           Effect.catchTag("ProviderModelNotFoundError", () => Effect.succeed(undefined)),
         )

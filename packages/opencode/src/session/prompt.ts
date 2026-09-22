@@ -1091,9 +1091,12 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
-            Effect.provideService(Database.Service, database),
-          )
+          // The budget is counted from the whole session, the model sees only what survives
+          // compaction. Reading the history once serves both: `filterCompacted` trims to a tail for
+          // the context window, so spending it as the record of what was spent would reset an
+          // agent's budget every time a long session compacts.
+          const history = yield* MessageV2.stream(sessionID).pipe(Effect.provideService(Database.Service, database))
+          let msgs = MessageV2.filterCompacted(history)
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
@@ -1160,15 +1163,6 @@ const layer = Layer.effect(
             continue
           }
 
-          if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
-          ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-            continue
-          }
-
           const agent = yield* agents.get(lastUser.agent)
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -1182,14 +1176,34 @@ const layer = Layer.effect(
           // rest of the session runs on the cheap model, and only an explicitly configured ceiling
           // ends the run. See SessionBudget.
           const budget = SessionBudget.evaluate({
-            messages: msgs,
+            messages: history,
             agent: agent.name,
             budget: agent.budget,
             stop: agent.budgetStop,
           })
-          const small = budget.degrade && !budget.stop ? yield* provider.getSmallModel(model.providerID) : undefined
+          // An agent configured `small` is on the cheap model for every turn, the summary turn at a
+          // ceiling included. A degraded one is not: that last turn is text-only and has to say what
+          // was done and what is left, which is the wrong place to save a few cents.
+          const wantsSmall = agent.small === true || (budget.degrade && !budget.stop)
+          const candidate = wantsSmall ? yield* provider.getSmallModel(model.providerID) : undefined
+          // The same guards the V2 resolver applies: an agent turn carries tool definitions, so a
+          // model that cannot call them is no substitute however cheap, and a "small" model that is
+          // the session model changes nothing but the notice the agent would be shown.
+          const small =
+            candidate && candidate.capabilities.toolcall && candidate.id !== model.id ? candidate : undefined
           const stepModel = small ?? model
           const isLastStep = step >= maxSteps || budget.stop
+
+          // Sized against the model the request will hit, not the one the session started on: a
+          // degraded turn may face a much smaller context window.
+          if (
+            lastFinished &&
+            lastFinished.summary !== true &&
+            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model: stepModel }))
+          ) {
+            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+            continue
+          }
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),
@@ -1202,7 +1216,10 @@ const layer = Layer.effect(
             role: "assistant",
             mode: agent.name,
             agent: agent.name,
-            variant: lastUser.model.variant,
+            // A variant chosen for the session model means nothing on a different one, so a
+            // degraded turn drops it rather than asking the small model for a setting it may not
+            // offer, or worse, one that happens to share a name.
+            variant: small ? undefined : lastUser.model.variant,
             path: { cwd: ctx.directory, root: ctx.worktree },
             cost: 0,
             tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -1227,7 +1244,7 @@ const layer = Layer.effect(
             .create({
               assistantMessage: msg,
               sessionID,
-              model,
+              model: stepModel,
             })
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
@@ -1239,7 +1256,7 @@ const layer = Layer.effect(
             const tools = yield* SessionTools.resolve({
               agent,
               session,
-              model,
+              model: stepModel,
               processor: handle,
               bypassAgentCheck,
               messages: msgs,
@@ -1269,10 +1286,10 @@ const layer = Layer.effect(
 
             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
-              sys.environment(model),
+              sys.environment(stepModel),
               instruction.system().pipe(Effect.orDie),
               sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model),
+              MessageV2.toModelMessagesEffect(msgs, stepModel),
             ])
             const system = [
               ...env,
@@ -1282,6 +1299,16 @@ const layer = Layer.effect(
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            // The prompt below tells the model tools are disabled; withhold them so it is true. A
+            // ceiling that only asks the model to stop is not a ceiling: a model that keeps calling
+            // tools would re-enter this loop and pay for another turn past the limit. A structured
+            // request is the exception, because its answer is itself a tool call — leaving it with
+            // nothing to call and `toolChoice: "required"` would only fail the request.
+            const stepTools = !isLastStep
+              ? tools
+              : format.type === "json_schema"
+                ? { StructuredOutput: tools["StructuredOutput"] }
+                : {}
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1311,7 +1338,7 @@ const layer = Layer.effect(
                       ]
                     : []),
               ],
-              tools,
+              tools: stepTools,
               model: stepModel,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })

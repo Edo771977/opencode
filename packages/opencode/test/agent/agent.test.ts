@@ -339,6 +339,28 @@ it.instance(
 )
 
 it.instance(
+  "agent small config is read and stays out of provider options",
+  () =>
+    Effect.gen(function* () {
+      const build = yield* load((svc) => svc.get("build"))
+      const plan = yield* load((svc) => svc.get("plan"))
+      expect(build?.small).toBe(true)
+      expect(plan?.small).toBeUndefined()
+      // A key the config parser does not know is passed through to the provider as an option, which
+      // would send `small: true` to the model instead of picking one.
+      expect(build?.options).not.toHaveProperty("small")
+    }),
+  {
+    config: {
+      agent: {
+        build: { small: true },
+        plan: {},
+      },
+    },
+  },
+)
+
+it.instance(
   "agent mode can be overridden",
   () =>
     Effect.gen(function* () {

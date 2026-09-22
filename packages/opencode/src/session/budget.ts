@@ -34,11 +34,11 @@ export function evaluate(input: {
   // What was spent before the most recent turn, which is how a threshold reached now is told apart
   // from one reached several turns ago.
   const before = spent - (costs.at(-1) ?? 0)
-  const reached = (limit: number | undefined) => limit !== undefined && spent >= limit
+  const budget = input.budget
   return {
     spent,
-    degrade: reached(input.budget),
-    crossed: reached(input.budget) && input.budget !== undefined && before < input.budget,
-    stop: reached(input.stop),
+    degrade: budget !== undefined && spent >= budget,
+    crossed: budget !== undefined && spent >= budget && before < budget,
+    stop: input.stop !== undefined && spent >= input.stop,
   }
 }

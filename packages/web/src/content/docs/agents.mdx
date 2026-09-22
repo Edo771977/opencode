@@ -339,8 +339,12 @@ That is the deliberate default: a run meant to carry a piece of work to the end 
 
 Both are counted per agent per session, so switching agents mid-session gives each its own budget, and a subagent's session carries only its own work. An agent with no `budget` is never degraded.
 
+Set `budget_stop` above `budget` if you want both to happen. They are independent thresholds, so a ceiling at or below the budget stops the agent at a point it would never have reached cheaply — which is a reasonable thing to ask for, but not usually what someone who set both had in mind.
+
+The ceiling's own turn runs on the agent's normal model: it has to say what was done and what is left, which is the wrong place to save a few cents. An agent with [`small`](#small-model) is on the cheap model for that turn too, because it is on the cheap model for every turn.
+
 :::note
-Spend is measured from the usage each provider reports. A local model that reports no cost never reaches a budget.
+Spend is measured from the usage each provider reports. A local model that reports no cost never reaches a budget. Degrading picks the same model as [`small`](#small-model), so the caveats there apply: with no cheaper model available the agent keeps working on the session model, and a `small_model` from another provider sends the rest of the session to that provider.
 :::
 
 ---
@@ -419,17 +423,19 @@ Set `small` to run this agent on a cheaper, faster model without naming one per 
 
 The model is picked in this order:
 
-1. The [`small_model`](/docs/config#models) option, if you set one and it is in your catalog. It takes the same `provider/model` form as [`model`](#model), and may name a variant: `anthropic/claude-haiku-4-5#fast`.
-2. Otherwise the cheapest recent model of the session's provider that can call tools.
+1. The [`small_model`](/docs/config#models) option, if you set one and it is in your catalog. It takes the same `provider/model` form as [`model`](#model).
+2. Otherwise a cheaper model of the session's own provider, when one is known for it.
 3. Otherwise the session model, unchanged.
 
 A few things to know:
 
 - `small` applies to every turn the agent takes, not only to short ones. Use the [`model`](#model) option instead when you want a specific model.
-- A model that cannot call tools is never selected, because an agent's turn carries tool definitions. A `small_model` that cannot is skipped outright rather than falling through to step 2, and a warning is logged — the point of naming a model is not to get a different one.
+- It outranks the agent's own [`model`](#model): asking for the small model is asking for the cheap one, whichever model the agent would otherwise have used.
+- A model that cannot call tools is never selected, because an agent's turn carries tool definitions.
+- A small model that resolves to the session's own model changes nothing, and is treated as if none were available.
 - `small_model` may name a model from another provider than the session's. Nothing else does that on its own, so keep it in mind if a project-level config sets it.
-- A variant is never inherited and always honored when written: the session's variant is meaningless on a different model, so it is not carried over, while a variant written into `small_model` names that exact pair. With none written, the small model's own default variant applies.
-- A value that is not a `provider/model` reference, or that names a variant the model does not offer, is ignored with a warning rather than silently reshaping the request.
+- A variant is never inherited: the session's variant is meaningless on a different model, so the small model runs with its own default. A variant written into `small_model` selects the model it names and nothing more.
+- A value that is not a `provider/model` reference, or that names a model you do not have, is ignored rather than silently reshaping the request.
 - Nothing here can fail a turn: if no suitable small model is available, or its provider is not authorized, the agent runs on the session model.
 - The model that actually answered is the one recorded in the session, so usage and cost are attributed to it.
 

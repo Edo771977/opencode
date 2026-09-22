@@ -2468,3 +2468,156 @@ noLLMServer.instance(
     }),
   30_000,
 )
+
+// budget.test.ts covers the decision; these cover what the decision is for. Every finding the
+// reviews raised against the first budget commit was a step threaded through the wrong model or
+// the wrong tool set, which only a run of the whole loop can catch.
+function budgetCfg(agent: { small?: boolean; budget?: number; budget_stop?: number }) {
+  return (url: string) => {
+    const base = providerCfg(url)
+    return {
+      ...base,
+      provider: {
+        ...base.provider,
+        test: {
+          ...base.provider.test,
+          models: {
+            ...base.provider.test.models,
+            "test-small": { ...base.provider.test.models["test-model"], id: "test-small", name: "Test Small" },
+          },
+        },
+      },
+      small_model: "test/test-small",
+      agent: { build: agent },
+    }
+  }
+}
+
+const spend = Effect.fn("test.spend")(function* (sessionID: SessionID, cost: number) {
+  const sessions = yield* Session.Service
+  const seeded = yield* seed(sessionID, { finish: "stop" })
+  yield* sessions.updateMessage({ ...seeded.assistant, cost })
+  return seeded
+})
+
+it.instance("loop degrades a spent agent to the small model and tells it once", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits).toHaveLength(1)
+    expect(hits[0]?.body.model).toBe("test-small")
+    expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET REACHED")
+    // Degrading is not stopping: the agent keeps working, so it keeps its tools.
+    expect(hits[0]?.body.tools).toBeDefined()
+  }),
+)
+
+it.instance("loop withholds tools on the turn that reaches the ceiling", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, budget_stop: 0.9 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("summary")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits).toHaveLength(1)
+    expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET EXHAUSTED")
+    // The ceiling's prompt claims tools are disabled; nothing is sent for the model to call.
+    expect(hits[0]?.body.tools).toBeUndefined()
+    // A stopped agent is not degraded: there is no next turn to make cheaper.
+    expect(hits[0]?.body.model).toBe("test-model")
+  }),
+)
+
+it.instance("loop runs an agent configured small on the small model", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ small: true }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits).toHaveLength(1)
+    expect(hits[0]?.body.model).toBe("test-small")
+    // Nothing was spent against a budget, so the agent is not told anything about one.
+    expect(JSON.stringify(hits[0]?.body)).not.toContain("BUDGET")
+  }),
+)
+
+it.instance(
+  "loop keeps the structured output tool on the turn that reaches the ceiling",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(budgetCfg({ budget_stop: 0.9 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* llm.hang
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "answer" }],
+        format: new SessionV1.OutputFormatJsonSchema({
+          type: "json_schema",
+          schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
+          retryCount: 0,
+        }),
+      })
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(llm.wait(1), "timed out waiting for the structured request", "10 seconds")
+
+      const hits = yield* llm.hits
+      // The answer to a structured request is itself a tool call, so withholding every tool would
+      // leave the model with nothing to call and a request that asks it to call something.
+      expect(hits[0]?.body.tools).toHaveLength(1)
+      expect(JSON.stringify(hits[0]?.body.tools)).toContain("StructuredOutput")
+      expect(hits[0]?.body.tool_choice).toBe("required")
+      yield* Fiber.interrupt(fiber)
+    }),
+  15_000,
+)

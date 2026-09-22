@@ -62,6 +62,7 @@ const Selection = Schema.Union([
 ])
 const Agent = Schema.Struct({
   model: Schema.optional(Selection),
+  small: Schema.optional(Schema.Boolean),
   request: Schema.optional(
     Schema.Struct({
       headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
@@ -397,7 +398,7 @@ function lowerServer(input: Schema.Schema.Type<typeof Server>) {
 
 function lowerAgent(input: Schema.Schema.Type<typeof Agent>) {
   const result: Record<string, unknown> = {}
-  for (const key of ["description", "mode", "hidden", "color", "steps", "budget", "budget_stop"] as const) {
+  for (const key of ["description", "mode", "hidden", "color", "steps", "small", "budget", "budget_stop"] as const) {
     if (input[key] !== undefined) result[key] = input[key]
   }
   if (input.system !== undefined) result.prompt = input.system

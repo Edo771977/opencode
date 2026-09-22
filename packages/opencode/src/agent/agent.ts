@@ -48,6 +48,7 @@ export const Info = Schema.Struct({
       providerID: ProviderV2.ID,
     }),
   ),
+  small: Schema.optional(Schema.Boolean),
   variant: Schema.optional(Schema.String),
   prompt: Schema.optional(Schema.String),
   options: Schema.Record(Schema.String, Schema.Unknown),
@@ -281,6 +282,7 @@ const layer = Layer.effect(
               native: false,
             }
           if (value.model) item.model = Provider.parseModel(value.model)
+          item.small = value.small ?? item.small
           item.variant = value.variant ?? item.variant
           item.prompt = value.prompt ?? item.prompt
           item.description = value.description ?? item.description
