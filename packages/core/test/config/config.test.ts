@@ -86,8 +86,6 @@ describe("Config", () => {
       // A V2-only key settles it the other way, so a V2 file using it keeps its V2 keys.
       expect(ConfigMigrateV1.isV1({ small_model: "a/b", agents: {} })).toBe(false)
       expect(ConfigMigrateV1.isV1({ small_model: "a/b", permissions: [] })).toBe(false)
-      // `subagent_depth` has no V2 counterpart, so it settles the reading on its own.
-      expect(ConfigMigrateV1.isV1({ subagent_depth: 3 })).toBe(true)
     }),
   )
 

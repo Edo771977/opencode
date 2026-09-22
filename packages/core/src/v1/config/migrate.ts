@@ -17,7 +17,6 @@ const keys = new Set([
   "autoshare",
   "disabled_providers",
   "enabled_providers",
-  "subagent_depth",
   "mode",
   "agent",
   "provider",
