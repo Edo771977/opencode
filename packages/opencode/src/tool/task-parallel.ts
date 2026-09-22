@@ -5,6 +5,7 @@ import { Session } from "@/session/session"
 import { MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
+import { BackgroundJob } from "@/background/job"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { TaskPromptOps } from "./task"
 import { Config } from "@/config/config"
@@ -26,7 +27,7 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-export type Outcome = { description: string; state: "completed" | "error"; text: string }
+export type Outcome = { description: string; state: "completed" | "error" | "cancelled"; text: string }
 
 export function renderSummary(results: Outcome[]) {
   const lines = results.map((r) => {
@@ -42,6 +43,7 @@ export const TaskParallelTool = Tool.define(
   id,
   Effect.gen(function* () {
     const agent = yield* Agent.Service
+    const background = yield* BackgroundJob.Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
     const database = yield* Database.Service
@@ -166,46 +168,80 @@ export const TaskParallelTool = Tool.define(
         { concurrency: "unbounded" },
       )
 
+      // Surface the children before they finish: the UI, the children endpoint and recursive
+      // cancellation all read this, and an interrupted call would otherwise never report them.
+      yield* ctx.metadata({
+        title: `Ran ${params.tasks.length} subtasks in parallel`,
+        metadata: {
+          parentSessionId: ctx.sessionID,
+          subtaskSessions: prepared.map((p) => p.session.id),
+        },
+      })
+
       // A fan-out that cannot be stopped would leave every child session running after the user
       // interrupts, so mirror the task tool: cancel all children on abort and on interruption.
       const runCancel = yield* EffectBridge.make()
-      const cancelAll = Effect.forEach(prepared, (p) => ops.cancel(p.session.id), { discard: true })
+      const cancelAll = Effect.forEach(
+        prepared,
+        (p) => Effect.all([ops.cancel(p.session.id), background.cancel(p.session.id)], { discard: true }),
+        { discard: true },
+      )
 
       function onAbort() {
         runCancel.fork(cancelAll)
       }
 
-      // Run all subtasks in parallel; each drives its own subagent session to completion.
+      const runSubtask = Effect.fn("TaskParallelTool.runSubtask")(function* (p: (typeof prepared)[number]) {
+        const parts = yield* ops.resolvePromptParts(p.task.prompt)
+        const result = yield* ops.prompt({
+          messageID: MessageID.ascending(),
+          sessionID: p.session.id,
+          model: {
+            modelID: p.model.modelID,
+            providerID: p.model.providerID,
+          },
+          variant: p.next.model ? undefined : variant,
+          agent: p.next.name,
+          parts,
+        })
+        const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
+        const err =
+          result.info.role === "assistant" && result.info.error
+            ? ("message" in result.info.error.data &&
+                typeof result.info.error.data.message === "string" &&
+                result.info.error.data.message) ||
+              result.info.error.name
+            : undefined
+        if (err) return yield* Effect.fail(new Error(String(err)))
+        if (failed?.type === "tool" && failed.state.status === "error")
+          return yield* Effect.fail(new Error(failed.state.error))
+        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+      })
+
+      // Run all subtasks in parallel, each as a background job keyed by its session id. Registering
+      // them is what lets everything outside this tool call reach a running child, and it keeps one
+      // failing subtask from tearing down its siblings: the failure settles that job alone.
       const fanOut = Effect.forEach(
         prepared,
         (p) =>
           Effect.gen(function* () {
-            const parts = yield* ops.resolvePromptParts(p.task.prompt)
-            const result = yield* ops.prompt({
-              messageID: MessageID.ascending(),
-              sessionID: p.session.id,
-              model: {
-                modelID: p.model.modelID,
-                providerID: p.model.providerID,
+            yield* background.start({
+              id: p.session.id,
+              type: id,
+              title: p.task.description,
+              metadata: {
+                parentSessionId: ctx.sessionID,
+                sessionId: p.session.id,
+                model: p.model,
               },
-              variant: p.next.model ? undefined : variant,
-              agent: p.next.name,
-              parts,
+              run: runSubtask(p).pipe(Effect.onInterrupt(() => ops.cancel(p.session.id))),
             })
-            const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
-            const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
-            const err =
-              result.info.role === "assistant" && result.info.error
-                ? ("message" in result.info.error.data &&
-                    typeof result.info.error.data.message === "string" &&
-                    result.info.error.data.message) ||
-                  result.info.error.name
-                : undefined
-            if (err || failed) {
-              const message = err ? String(err) : "Subtask failed"
-              return { description: p.task.description, state: "error" as const, text: message }
-            }
-            return { description: p.task.description, state: "completed" as const, text }
+            const info = (yield* background.wait({ id: p.session.id })).info
+            if (info?.status === "error")
+              return { description: p.task.description, state: "error" as const, text: info.error ?? "Subtask failed" }
+            if (info?.status === "cancelled")
+              return { description: p.task.description, state: "cancelled" as const, text: "Subtask cancelled" }
+            return { description: p.task.description, state: "completed" as const, text: info?.output ?? "" }
           }).pipe(Effect.onInterrupt(() => ops.cancel(p.session.id))),
         { concurrency: "unbounded" },
       )

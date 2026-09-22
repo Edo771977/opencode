@@ -1196,6 +1196,59 @@ describe("tool.task-parallel", () => {
     },
   )
 
+  it.instance("a failing subtask is reported without tearing down its siblings", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            const text = input.parts.find((part) => part.type === "text")?.text ?? ""
+            return reply(
+              input,
+              "finished",
+              text.includes("explode")
+                ? new SessionV1.APIError({ message: "Network connection lost", isRetryable: false }).toObject()
+                : undefined,
+            )
+          }),
+      }
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            { description: "healthy one", prompt: "do the work", subagent_type: "general" },
+            { description: "broken one", prompt: "explode please", subagent_type: "general" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("- healthy one: COMPLETED")
+      expect(result.output).toContain("  finished")
+      expect(result.output).toContain("- broken one: ERROR")
+      expect(result.output).toContain("Network connection lost")
+
+      // Each child runs as a background job keyed by its session id, which is what lets the UI and
+      // recursive cancellation reach it while it is still running.
+      expect((yield* jobs.get(result.metadata.subtaskSessions[0]!))?.status).toBe("completed")
+      expect((yield* jobs.get(result.metadata.subtaskSessions[1]!))?.status).toBe("error")
+    }),
+  )
+
   it.instance("execute fans out to one child session per subtask and denies nested fan-out", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
