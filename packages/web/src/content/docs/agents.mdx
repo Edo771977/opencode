@@ -657,6 +657,28 @@ When set to `deny`, the subagent is removed from the Task tool description entir
 
 Subagents do not fan out by default: a subagent is denied `task` and `task-parallel` unless its own permissions grant them, and the `subagent_depth` config still caps nesting. Tools you reserve for primary agents through `experimental.primary_tools` are denied to subagents spawned either way.
 
+---
+
+### Subagent results
+
+A subagent answers in prose, and the caller receives its last block of text. That reads well and is hard to act on, so a caller that will use the answer rather than relay it can declare the fields it needs back. The subagent is then told to end with one JSON object carrying exactly those fields, and the task fails if it does not produce them — the caller never has to parse prose or guess at a missing value.
+
+This is set by the calling model on the Task tool, not in your config:
+
+```json
+{
+  "description": "audit dependencies",
+  "prompt": "Check every direct dependency for a known advisory.",
+  "subagent_type": "general",
+  "output": [
+    { "name": "summary", "description": "What was found", "type": "string" },
+    { "name": "advisories", "description": "One entry per affected package", "type": "array" }
+  ]
+}
+```
+
+A field may declare a `type` — `string`, `number`, `boolean`, `array` or `object` — or leave it out to accept any value. When a subagent ignores the shape, the task fails with what was missing and the session stays resumable through its `task_id`, so the caller can say what was wrong instead of starting over. The parallel fan-out takes the same declaration per subtask, which is what lets several results be integrated side by side.
+
 :::tip
 Rules are evaluated in order, and the **last matching rule wins**. In the example above, `orchestrator-planner` matches both `*` (deny) and `orchestrator-*` (allow), but since `orchestrator-*` comes after `*`, the result is `allow`.
 :::

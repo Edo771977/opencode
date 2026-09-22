@@ -7,6 +7,7 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+import { TaskOutput } from "./task-output"
 import type { TaskPromptOps } from "./task"
 import { Config } from "@/config/config"
 import { Effect, Exit, Schema } from "effect"
@@ -19,6 +20,10 @@ const Subtask = Schema.Struct({
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the subtask" }),
   prompt: Schema.String.annotate({ description: "The subtask for the agent to perform autonomously" }),
   subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this subtask" }),
+  output: Schema.optional(Schema.Array(TaskOutput.Field)).annotate({
+    description:
+      "Fields you need back from this subtask. Set this when you will act on the answers rather than read them: the subagent is told to end with a JSON object carrying exactly these fields, and the subtask is reported as an error if it does not",
+  }),
 })
 
 export const Parameters = Schema.Struct({
@@ -202,7 +207,9 @@ export const TaskParallelTool = Tool.define(
           },
           variant: p.next.model ? undefined : variant,
           agent: p.next.name,
-          parts,
+          parts: p.task.output?.length
+            ? [...parts, { type: "text" as const, synthetic: true, text: TaskOutput.instruction(p.task.output) }]
+            : parts,
         })
         const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
         const err =
@@ -215,7 +222,12 @@ export const TaskParallelTool = Tool.define(
         if (err) return yield* Effect.fail(new Error(String(err)))
         if (failed?.type === "tool" && failed.state.status === "error")
           return yield* Effect.fail(new Error(failed.state.error))
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        if (!p.task.output?.length) return text
+        const parsed = TaskOutput.parse(text, p.task.output)
+        if (!parsed.ok)
+          return yield* Effect.fail(new Error(`Subtask did not return the requested fields: ${parsed.error}`))
+        return JSON.stringify(parsed.value, null, 2)
       })
 
       // Run all subtasks in parallel, each as a background job keyed by its session id. Registering

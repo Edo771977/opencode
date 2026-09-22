@@ -17,3 +17,4 @@ Usage notes:
 5. The agent's outputs should generally be trusted
 6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
 7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+8. When you will act on the answer rather than read it, set `output` to the fields you need back. The agent is then told to end with a JSON object carrying exactly those fields, the result you get is that object, and the task fails if the agent does not produce it — so you never have to parse prose or guess at a missing value. Resume with the returned task_id to tell the agent what was wrong.

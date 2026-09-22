@@ -13,3 +13,4 @@ Usage notes:
 3. Each subtask starts with a fresh context. Be detailed and explicit about what each subtask should produce and return.
 4. The result is a combined summary of every subtask's outcome (COMPLETED, ERROR, or CANCELLED), so you can integrate them in your next step. An ERROR subtask carries its failure in place of its output; a CANCELLED one was stopped before it finished and produced nothing.
 5. If a subtask is better served by a single focused agent, prefer the Task tool instead.
+6. Set a subtask's `output` to the fields you need back when you will act on its answer rather than read it. That subtask then reports a JSON object carrying exactly those fields, which is what makes several results integrable side by side; a subtask that does not produce them is reported as an error.

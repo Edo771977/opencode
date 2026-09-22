@@ -313,6 +313,38 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "A short (3-5 words) description of the task",
       "type": "string",
     },
+    "output": {
+      "description": "Fields you need back from the subagent. Set this when you will act on the answer rather than read it: the subagent is told to end with a JSON object carrying exactly these fields, and the task fails if it does not, instead of handing you prose to guess at",
+      "items": {
+        "properties": {
+          "description": {
+            "description": "What this field should contain",
+            "type": "string",
+          },
+          "name": {
+            "description": "Key the subagent must put in its JSON answer",
+            "type": "string",
+          },
+          "type": {
+            "description": "Expected JSON type of the value. Defaults to accepting any type",
+            "enum": [
+              "string",
+              "number",
+              "boolean",
+              "array",
+              "object",
+            ],
+            "type": "string",
+          },
+        },
+        "required": [
+          "name",
+          "description",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",

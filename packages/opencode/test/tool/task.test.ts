@@ -418,6 +418,87 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("execute asks for declared fields and returns them as the result", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({
+        onPrompt: (input) => (seen = input),
+        text: 'Looked into it.\n\n```json\n{ "summary": "fixed the cache key", "files": ["src/cache.ts"] }\n```',
+      })
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          output: [
+            { name: "summary", description: "What was done", type: "string" },
+            { name: "files", description: "Files touched", type: "array" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // The subagent is told what to return, alongside the caller's own prompt.
+      const instructions = seen?.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])) ?? []
+      expect(instructions[0]).toBe("look into the cache key path")
+      expect(instructions.at(-1)).toContain("- summary (string): What was done")
+
+      // The caller gets the object, not the prose around it.
+      expect(JSON.parse(result.output.split("<task_result>")[1]!.split("</task_result>")[0]!)).toEqual({
+        summary: "fixed the cache key",
+        files: ["src/cache.ts"],
+      })
+    }),
+  )
+
+  it.instance("execute fails when the subagent does not return the declared fields", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+            output: [{ name: "summary", description: "What was done", type: "string" }],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ text: "I had a look and it seems fine." }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      if (Exit.isSuccess(exit)) throw new Error("expected the task to fail")
+      // The message carries the task_id, so the caller can resume and say what was wrong.
+      expect(Cause.squash(exit.cause)).toMatchObject({
+        message: expect.stringContaining("did not return the requested fields"),
+      })
+    }),
+  )
+
   it.instance("execute cancels child session when abort signal fires", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed()
@@ -1246,6 +1327,62 @@ describe("tool.task-parallel", () => {
       // recursive cancellation reach it while it is still running.
       expect((yield* jobs.get(result.metadata.subtaskSessions[0]!))?.status).toBe("completed")
       expect((yield* jobs.get(result.metadata.subtaskSessions[1]!))?.status).toBe("error")
+    }),
+  )
+
+  it.instance("declared fields are enforced per subtask", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() =>
+            reply(
+              input,
+              input.parts.some((part) => part.type === "text" && part.text.includes("answer in prose"))
+                ? "I had a look and it seems fine."
+                : '```json\n{ "status": "done" }\n```',
+            ),
+          ),
+      }
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            {
+              description: "structured one",
+              prompt: "do the work",
+              subagent_type: "general",
+              output: [{ name: "status", description: "How it went", type: "string" }],
+            },
+            {
+              description: "prose one",
+              prompt: "answer in prose please",
+              subagent_type: "general",
+              output: [{ name: "status", description: "How it went", type: "string" }],
+            },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("- structured one: COMPLETED")
+      expect(result.output).toContain('"status": "done"')
+      // One subtask ignoring the shape does not cost the caller the others.
+      expect(result.output).toContain("- prose one: ERROR")
+      expect(result.output).toContain("did not return the requested fields")
     }),
   )
 
