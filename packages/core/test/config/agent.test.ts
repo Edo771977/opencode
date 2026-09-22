@@ -147,6 +147,7 @@ describe("ConfigAgentPlugin.Plugin", () => {
                 agents: {
                   reviewer: {
                     model: "anthropic/claude-sonnet",
+                    small: true,
                     system: "Review carefully.",
                     description: "Reviews changes",
                     mode: "subagent",
@@ -184,6 +185,7 @@ describe("ConfigAgentPlugin.Plugin", () => {
       const reviewer = yield* agents.get(AgentV2.ID.make("reviewer"))
       if (!reviewer) throw new Error("expected configured reviewer agent")
       expect(reviewer).toMatchObject({
+        small: true,
         system: "Review carefully.",
         description: "Reviews changes",
         mode: "subagent",
