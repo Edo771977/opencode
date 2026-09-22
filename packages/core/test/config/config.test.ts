@@ -125,6 +125,54 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("carries subagent_depth across the migration", () =>
+    Effect.sync(() => {
+      // V1 spells it at the top level, V2 under `experimental`, which is the spelling the V1
+      // runtime's compatibility layer already accepts. Without the mapping the setting has no
+      // representation in V2 config at all.
+      const migrated = ConfigMigrateV1.migrate(
+        Schema.decodeUnknownSync(ConfigV1.Info)({ subagent_depth: 3, agent: {} }, { errors: "all" }),
+      )
+      expect(migrated.experimental?.subagent_depth).toBe(3)
+      expect(Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" }).experimental?.subagent_depth).toBe(3)
+      expect(ConfigMigrateV1.migrate({}).experimental).toBeUndefined()
+    }),
+  )
+
+  it.effect("reports the two spellings a half-migrated file uses", () =>
+    Effect.sync(() => {
+      expect(ConfigMigrateV1.mixed({ agent: {}, agents: {} })).toMatchObject({
+        legacy: ["agent"],
+        current: ["agents"],
+      })
+      // The V1 shape of a shared key counts as a legacy signal, the same way it decides the reading.
+      expect(ConfigMigrateV1.mixed({ skills: { paths: ["./s"] }, agents: {} })?.legacy).toEqual(["skills"])
+      // One shape alone is not a mix, whichever it is.
+      expect(ConfigMigrateV1.mixed({ agent: {} })).toBeUndefined()
+      expect(ConfigMigrateV1.mixed({ agents: {} })).toBeUndefined()
+      expect(ConfigMigrateV1.mixed("not an object")).toBeUndefined()
+    }),
+  )
+
+  it.effect("lays the authored v2 half back over the migrated one", () =>
+    Effect.sync(() => {
+      // Records of named things merge by name, so moving one agent to the new spelling does not
+      // drop the ones still written in the old.
+      expect(
+        ConfigMigrateV1.overlay({ agents: { build: { steps: 4 } } }, { agents: { helper: { description: "x" } } }),
+      ).toEqual({ agents: { build: { steps: 4 }, helper: { description: "x" } } })
+      // The authored entry wins where both spellings name the same thing.
+      expect(ConfigMigrateV1.overlay({ agents: { build: { steps: 4 } } }, { agents: { build: { steps: 9 } } })).toEqual({
+        agents: { build: { steps: 9 } },
+      })
+      // Everything else is replaced: two lists of rules have no meaningful merge.
+      expect(ConfigMigrateV1.overlay({ permissions: [{ action: "bash" }] }, { permissions: [] })).toEqual({
+        permissions: [],
+      })
+      expect(ConfigMigrateV1.overlay({ snapshots: false }, { snapshots: true })).toEqual({ snapshots: true })
+    }),
+  )
+
   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>
     Effect.sync(() => {
       FastCheck.assert(
@@ -307,6 +355,38 @@ describe("Config", () => {
               resource: "openai",
             })
             expect(yield* Effect.promise(() => fs.readFile(file, "utf8"))).toBe(contents)
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps both halves of a half-migrated config file", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // One legacy key sends the whole file through the V1 reading, which has nowhere to put
+          // `agents`. Before it was laid back on top, everything written in the new spelling was
+          // dropped without a word.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                agent: { build: { prompt: "legacy" } },
+                agents: { helper: { description: "current" } },
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.agents?.["helper"]?.description).toBe("current")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
           }).pipe(Effect.provide(testLayer(tmp.path)))
         }),
       ),

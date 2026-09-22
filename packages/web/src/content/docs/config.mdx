@@ -558,6 +558,8 @@ You can control how deeply subagents can invoke other subagents using the `subag
 
 The default is `1`, which allows primary agents to launch subagents but prevents those subagents from launching additional subagents. Set it to `2` to allow one additional level of nested subagents, or `0` to prevent all subagent launches.
 
+It can also be written as `experimental.subagent_depth`. Both spellings mean the same thing; the top-level one wins if a file sets both.
+
 ---
 
 ### Sharing

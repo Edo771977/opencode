@@ -159,9 +159,22 @@ const layer = Layer.effect(
         return
       }
 
+      // A file half-way through the migration carries both spellings, and one legacy key is enough
+      // to send the whole file through the V1 reading, which has nowhere to put the keys only V2
+      // has. Laying those back over the migrated file is the only reading that loses neither half.
+      const mixed = ConfigMigrateV1.mixed(input)
+      if (mixed)
+        yield* Effect.logWarning(
+          `${filepath} mixes legacy (${mixed.legacy.join(", ")}) and current (${mixed.current.join(", ")}) configuration keys; the current ones are used as written`,
+        )
+
       const info = Option.getOrUndefined(
         ConfigMigrateV1.isV1(input)
-          ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
+          ? decodeV1Info(input).pipe(
+              Option.map(ConfigMigrateV1.migrate),
+              Option.map((migrated) => ({ ...migrated, ...(mixed ? ConfigMigrateV1.overlay(migrated, mixed.value) : {}) })),
+              Option.flatMap(decodeInfo),
+            )
           : decodeInfo(input),
       )
       // A file that does not decode is skipped whole — every setting in it, not just the offending
