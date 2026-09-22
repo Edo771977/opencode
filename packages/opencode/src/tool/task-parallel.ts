@@ -30,7 +30,10 @@ export type Outcome = { description: string; state: "completed" | "error" | "can
 
 export function renderSummary(results: Outcome[]) {
   const lines = results.map((r) => {
-    return `- ${r.description}: ${r.state.toUpperCase()}\n${r.text.split("\n").map((l) => `  ${l}`).join("\n")}`
+    return `- ${r.description}: ${r.state.toUpperCase()}\n${r.text
+      .split("\n")
+      .map((l) => `  ${l}`)
+      .join("\n")}`
   })
   return ["<parallel-tasks>", ...lines, "</parallel-tasks>"].join("\n")
 }
@@ -99,52 +102,54 @@ export const TaskParallelTool = Tool.define(
       const parentProviderID = msg.info.providerID
 
       // Resolve each subtask's agent + session up front, then run them in parallel.
-      const prepared = yield* Effect.forEach(params.tasks, (task, index) =>
-        Effect.gen(function* () {
-          const next = yield* agent.get(task.subagent_type)
-          if (!next) {
-            return yield* Effect.fail(
-              new Error(`Unknown agent type: ${task.subagent_type} is not a valid agent type`),
-            )
-          }
-          const childPermission = deriveSubagentSessionPermission({
-            parentSessionPermission: parent.permission ?? [],
-            subagent: next,
-          })
-          const childToolDenies = [
-            ...(next.permission.some((rule) => rule.permission === "todowrite")
-              ? []
-              : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
-            ...(next.permission.some((rule) => rule.permission === "task")
-              ? []
-              : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
-            ...(next.permission.some((rule) => rule.permission === id)
-              ? []
-              : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
-          ]
-          const session = yield* sessions.create({
-            parentID: ctx.sessionID,
-            title: task.description + ` (@${next.name} subagent)`,
-            agent: next.name,
-            permission: [
-              ...childPermission,
-              ...childToolDenies.filter(
-                (deny) =>
-                  !childPermission.some(
-                    (rule) =>
-                      rule.permission === deny.permission &&
-                      rule.pattern === deny.pattern &&
-                      rule.action === deny.action,
-                  ),
-              ),
-            ],
-          })
-          const model = next.model ?? {
-            modelID: parentModelID,
-            providerID: parentProviderID,
-          }
-          return { index, task, next, session, model }
-        }),
+      const prepared = yield* Effect.forEach(
+        params.tasks,
+        (task, index) =>
+          Effect.gen(function* () {
+            const next = yield* agent.get(task.subagent_type)
+            if (!next) {
+              return yield* Effect.fail(
+                new Error(`Unknown agent type: ${task.subagent_type} is not a valid agent type`),
+              )
+            }
+            const childPermission = deriveSubagentSessionPermission({
+              parentSessionPermission: parent.permission ?? [],
+              subagent: next,
+            })
+            const childToolDenies = [
+              ...(next.permission.some((rule) => rule.permission === "todowrite")
+                ? []
+                : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+              ...(next.permission.some((rule) => rule.permission === "task")
+                ? []
+                : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
+              ...(next.permission.some((rule) => rule.permission === id)
+                ? []
+                : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+            ]
+            const session = yield* sessions.create({
+              parentID: ctx.sessionID,
+              title: task.description + ` (@${next.name} subagent)`,
+              agent: next.name,
+              permission: [
+                ...childPermission,
+                ...childToolDenies.filter(
+                  (deny) =>
+                    !childPermission.some(
+                      (rule) =>
+                        rule.permission === deny.permission &&
+                        rule.pattern === deny.pattern &&
+                        rule.action === deny.action,
+                    ),
+                ),
+              ],
+            })
+            const model = next.model ?? {
+              modelID: parentModelID,
+              providerID: parentProviderID,
+            }
+            return { index, task, next, session, model }
+          }),
         { concurrency: "unbounded" },
       )
 

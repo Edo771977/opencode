@@ -43,8 +43,6 @@ describe("task-parallel Parameters schema", () => {
   })
 
   test("rejects a subtask missing required fields", () => {
-    expect(() =>
-      Schema.decodeUnknownSync(Parameters)({ tasks: [{ description: "only description" }] }),
-    ).toThrow()
+    expect(() => Schema.decodeUnknownSync(Parameters)({ tasks: [{ description: "only description" }] })).toThrow()
   })
 })
