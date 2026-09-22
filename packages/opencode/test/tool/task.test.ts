@@ -1153,6 +1153,49 @@ describe("tool.task-parallel", () => {
     }),
   )
 
+  it.instance(
+    "execute keeps primary-only tools out of fan-out children",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskParallelTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            tasks: [
+              { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+              { description: "read docs", prompt: "summarize the readme", subagent_type: "general" },
+            ],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        for (const sessionID of result.metadata.subtaskSessions) {
+          const child = yield* sessions.get(sessionID)
+          expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "deny" })
+          expect(child.permission).toContainEqual({ permission: "read", pattern: "*", action: "deny" })
+        }
+      }),
+    {
+      config: {
+        experimental: {
+          primary_tools: ["bash", "read"],
+        },
+      },
+    },
+  )
+
   it.instance("execute fans out to one child session per subtask and denies nested fan-out", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service

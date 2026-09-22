@@ -26,7 +26,7 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-export type Outcome = { description: string; state: "completed" | "error" | "cancelled"; text: string }
+export type Outcome = { description: string; state: "completed" | "error"; text: string }
 
 export function renderSummary(results: Outcome[]) {
   const lines = results.map((r) => {
@@ -101,17 +101,23 @@ export const TaskParallelTool = Tool.define(
       const parentModelID = msg.info.modelID
       const parentProviderID = msg.info.providerID
 
-      // Resolve each subtask's agent + session up front, then run them in parallel.
+      // Resolve every agent before creating anything: a bad agent type in the middle of the list
+      // would otherwise leave the sessions created for its siblings behind with no prompt and no owner.
+      const resolved = yield* Effect.forEach(params.tasks, (task) =>
+        Effect.gen(function* () {
+          const next = yield* agent.get(task.subagent_type)
+          if (!next) {
+            return yield* Effect.fail(new Error(`Unknown agent type: ${task.subagent_type} is not a valid agent type`))
+          }
+          return { task, next }
+        }),
+      )
+
+      // Create each subtask's session up front, then run them in parallel.
       const prepared = yield* Effect.forEach(
-        params.tasks,
-        (task, index) =>
+        resolved,
+        ({ task, next }, index) =>
           Effect.gen(function* () {
-            const next = yield* agent.get(task.subagent_type)
-            if (!next) {
-              return yield* Effect.fail(
-                new Error(`Unknown agent type: ${task.subagent_type} is not a valid agent type`),
-              )
-            }
             const childPermission = deriveSubagentSessionPermission({
               parentSessionPermission: parent.permission ?? [],
               subagent: next,
@@ -126,6 +132,13 @@ export const TaskParallelTool = Tool.define(
               ...(next.permission.some((rule) => rule.permission === id)
                 ? []
                 : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+              // Tools an operator reserved for primary agents stay out of reach of a fan-out child,
+              // exactly as they do for a child spawned through the task tool.
+              ...(cfg.experimental?.primary_tools?.map((permission) => ({
+                permission,
+                pattern: "*" as const,
+                action: "deny" as const,
+              })) ?? []),
             ]
             const session = yield* sessions.create({
               parentID: ctx.sessionID,
@@ -193,7 +206,7 @@ export const TaskParallelTool = Tool.define(
               return { description: p.task.description, state: "error" as const, text: message }
             }
             return { description: p.task.description, state: "completed" as const, text }
-          }),
+          }).pipe(Effect.onInterrupt(() => ops.cancel(p.session.id))),
         { concurrency: "unbounded" },
       )
 
@@ -204,7 +217,10 @@ export const TaskParallelTool = Tool.define(
         () => fanOut,
         (_, exit) =>
           Effect.gen(function* () {
-            if (Exit.hasInterrupts(exit)) yield* cancelAll
+            // Not just interrupts: a prompt-layer error arrives as a defect, which interrupts the
+            // sibling fibers without marking the outer exit interrupted. Any non-success exit means
+            // no one is consuming these children any more, so stop them.
+            if (!Exit.isSuccess(exit)) yield* cancelAll
           }).pipe(
             Effect.ensuring(
               Effect.sync(() => {

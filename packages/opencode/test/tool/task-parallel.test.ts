@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
-import { renderSummary, Parameters } from "../src/tool/task-parallel"
+import { renderSummary, Parameters } from "../../src/tool/task-parallel"
 
 describe("task-parallel renderSummary", () => {
   test("renders completed and error outcomes with state labels", () => {
