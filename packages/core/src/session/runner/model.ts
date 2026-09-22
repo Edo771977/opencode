@@ -198,29 +198,43 @@ export const locationLayer = Layer.effect(
       if (defaultModel && supported(defaultModel)) return defaultModel
       return (yield* catalog.model.available()).find(supported)
     })
+    // Resolution runs once per provider step, so a standing misconfiguration would otherwise repeat
+    // its warning for every step of every turn. Each distinct reason is said once per location.
+    const warned = new Set<string>()
+    const warnOnce = Effect.fn("SessionRunnerModel.warnOnce")(function* (key: string, message: string) {
+      if (warned.has(key)) return
+      warned.add(key)
+      yield* Effect.logWarning(message)
+    })
     const configured = Effect.fn("SessionRunnerModel.configuredSmall")(function* () {
       const ref = Config.latest(yield* config.entries(), "small_model")
       if (ref === undefined) return undefined
-      const parsed = ModelV2.parse(ref)
+      const parsed = ModelV2.parseRef(ref)
+      if (!parsed) {
+        yield* warnOnce(`malformed:${ref}`, `Configured small_model "${ref}" is not a provider/model reference`)
+        return undefined
+      }
       const found = (yield* catalog.model.available()).find(
         (model) => model.providerID === parsed.providerID && model.id === parsed.modelID,
       )
-      // A `provider/model` that matches nothing is far more often a typo or a `#variant` suffix than
-      // a deliberate choice, and falling back to the catalog's own pick would hide it.
-      if (!found) yield* Effect.logWarning(`Configured small_model "${ref}" is not in the catalog; ignoring it`)
-      return found
+      // A reference that matches nothing is far more often a typo than a deliberate choice, and
+      // falling back to the catalog's own pick would hide it.
+      if (!found) yield* warnOnce(`missing:${ref}`, `Configured small_model "${ref}" is not in the catalog`)
+      return found && { model: found, variant: parsed.variant }
     })
     const resolveSmallModel = Effect.fn("SessionRunnerModel.resolveSmall")(function* (session: SessionSchema.Info) {
       const selected = yield* select(session)
       if (!selected) return undefined
       // An explicitly configured `small_model` outranks the catalog's heuristic pick: the user named
       // a model, and silently running a different one is worse than not running a small model at all.
-      const small = (yield* configured()) ?? (yield* catalog.model.small(selected.providerID))
+      const chosen: { model: ModelV2.Info | undefined; variant?: ModelV2.VariantID } = (yield* configured()) ?? {
+        model: yield* catalog.model.small(selected.providerID),
+      }
+      const small = chosen.model
       if (!small) return undefined
       if (!supported(small) || !small.capabilities.tools) {
-        // Silence here bills the user at the session model's rate for as long as the misconfiguration
-        // lasts, and this runs once per step, so say it once per reason.
-        yield* Effect.logWarning(
+        yield* warnOnce(
+          `unusable:${small.providerID}/${small.id}`,
           `Small model ${small.providerID}/${small.id} cannot serve an agent turn; using the session model instead`,
         )
         return undefined
@@ -232,9 +246,17 @@ export const locationLayer = Layer.effect(
       const connection = yield* integrations.connection.active(
         provider?.integrationID ?? Integration.ID.make(small.providerID),
       )
-      // Skip `resolve`: a variant selected for the session model is not offered by a different
-      // model, and asking for it there fails the turn the small model was meant to make cheaper.
-      return yield* fromCatalogModel(small, connection ? yield* integrations.connection.resolve(connection) : undefined)
+      // `available()` already keeps unauthorized providers out of the catalog, so this only states
+      // the invariant: never send a turn to another provider on an unauthenticated route.
+      if (small.providerID !== selected.providerID && !connection) return undefined
+      const credential = connection ? yield* integrations.connection.resolve(connection) : undefined
+      // Never inherit a variant, always honor a written one: the session's variant is meaningless on
+      // a different model, while a variant written into `small_model` names that exact pair. Passing
+      // undefined still applies the small model's own default variant, which calling
+      // `fromCatalogModel` directly used to skip.
+      return yield* withVariant(small, chosen.variant).pipe(
+        Effect.flatMap((model) => fromCatalogModel(model, credential)),
+      )
     })
     return Service.of({
       resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session) {

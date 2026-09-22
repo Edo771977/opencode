@@ -388,7 +388,7 @@ Set `small` to run this agent on a cheaper, faster model without naming one per 
 
 The model is picked in this order:
 
-1. The [`small_model`](/docs/config#models) option, if you set one and it is in your catalog.
+1. The [`small_model`](/docs/config#models) option, if you set one and it is in your catalog. It takes the same `provider/model` form as [`model`](#model), and may name a variant: `anthropic/claude-haiku-4-5#fast`.
 2. Otherwise the cheapest recent model of the session's provider that can call tools.
 3. Otherwise the session model, unchanged.
 
@@ -397,6 +397,8 @@ A few things to know:
 - `small` applies to every turn the agent takes, not only to short ones. Use the [`model`](#model) option instead when you want a specific model.
 - A model that cannot call tools is never selected, because an agent's turn carries tool definitions. A `small_model` that cannot is skipped outright rather than falling through to step 2, and a warning is logged — the point of naming a model is not to get a different one.
 - `small_model` may name a model from another provider than the session's. Nothing else does that on its own, so keep it in mind if a project-level config sets it.
+- A variant is never inherited and always honored when written: the session's variant is meaningless on a different model, so it is not carried over, while a variant written into `small_model` names that exact pair. With none written, the small model's own default variant applies.
+- A value that is not a `provider/model` reference, or that names a variant the model does not offer, is ignored with a warning rather than silently reshaping the request.
 - Nothing here can fail a turn: if no suitable small model is available, or its provider is not authorized, the agent runs on the session model.
 - The model that actually answered is the one recorded in the session, so usage and cost are attributed to it.
 

@@ -408,7 +408,13 @@ describe("SessionRunnerModel.resolveSmall", () => {
   )
 
   const seed = Effect.fn("SessionRunnerModelTest.seed")(function* (
-    models: ReadonlyArray<{ id: string; tools: boolean; cost: number }>,
+    models: ReadonlyArray<{
+      id: string
+      tools: boolean
+      cost: number
+      variants?: ReadonlyArray<{ id: string; body: Record<string, string> }>
+      defaultVariant?: string
+    }>,
   ) {
     const catalog = yield* Catalog.Service
     yield* catalog.transform((draft) => {
@@ -421,6 +427,9 @@ describe("SessionRunnerModel.resolveSmall", () => {
           model.capabilities.output = ["text"]
           model.cost = [{ input: item.cost, output: item.cost, cache: { read: 0, write: 0 } }]
           model.time.released = Date.now()
+          if (item.defaultVariant !== undefined) model.request.variant = item.defaultVariant
+          for (const variant of item.variants ?? [])
+            model.variants.push({ id: ModelV2.VariantID.make(variant.id), headers: {}, body: { ...variant.body } })
         })
       }
     })
@@ -463,6 +472,66 @@ describe("SessionRunnerModel.resolveSmall", () => {
 
       const models = yield* SessionRunnerModel.Service
       expect(yield* models.resolveSmall(session)).toBeUndefined()
+    }),
+  )
+
+  smallIt.effect("honors a variant written into small_model", () =>
+    Effect.gen(function* () {
+      configuredSmall = `${providerID}/chosen-haiku#fast`
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        { id: "chosen-haiku", tools: true, cost: 5, variants: [{ id: "fast", body: { effort: "low" } }] },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolveSmall(session)
+      expect(resolved).toMatchObject({ id: "chosen-haiku" })
+      expect(resolved?.route.defaults.http?.body).toMatchObject({ effort: "low" })
+    }),
+  )
+
+  smallIt.effect("applies the small model's own default variant", () =>
+    Effect.gen(function* () {
+      configuredSmall = `${providerID}/chosen-haiku`
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        {
+          id: "chosen-haiku",
+          tools: true,
+          cost: 5,
+          defaultVariant: "standard",
+          variants: [{ id: "standard", body: { effort: "medium" } }],
+        },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      expect((yield* models.resolveSmall(session))?.route.defaults.http?.body).toMatchObject({ effort: "medium" })
+    }),
+  )
+
+  smallIt.effect("declines a small_model naming a variant the model does not offer", () =>
+    Effect.gen(function* () {
+      configuredSmall = `${providerID}/chosen-haiku#nope`
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        { id: "chosen-haiku", tools: true, cost: 5, variants: [{ id: "fast", body: {} }] },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      expect(yield* models.resolveSmall(session)).toBeUndefined()
+    }),
+  )
+
+  smallIt.effect("ignores a small_model that is not a provider/model reference", () =>
+    Effect.gen(function* () {
+      configuredSmall = "chosen-haiku"
+      yield* seed([
+        { id: sessionModel, tools: true, cost: 20 },
+        { id: "cheap-mini", tools: true, cost: 1 },
+      ])
+
+      const models = yield* SessionRunnerModel.Service
+      expect(yield* models.resolveSmall(session)).toMatchObject({ id: "cheap-mini" })
     }),
   )
 

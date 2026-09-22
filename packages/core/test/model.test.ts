@@ -21,3 +21,36 @@ describe("ModelV2.Ref", () => {
     })
   })
 })
+
+describe("ModelV2.parseRef", () => {
+  test("reads a written reference", () => {
+    expect(ModelV2.parseRef("anthropic/claude-haiku-4-5")).toEqual({
+      providerID: ProviderV2.ID.make("anthropic"),
+      modelID: ModelV2.ID.make("claude-haiku-4-5"),
+    })
+  })
+
+  test("splits a written variant off the model id", () => {
+    expect(ModelV2.parseRef("anthropic/claude-haiku-4-5#thinking")).toEqual({
+      providerID: ProviderV2.ID.make("anthropic"),
+      modelID: ModelV2.ID.make("claude-haiku-4-5"),
+      variant: ModelV2.VariantID.make("thinking"),
+    })
+  })
+
+  test("keeps a model id that itself contains slashes", () => {
+    expect(ModelV2.parseRef("openrouter/openai/gpt-5#high")).toEqual({
+      providerID: ProviderV2.ID.make("openrouter"),
+      modelID: ModelV2.ID.make("openai/gpt-5"),
+      variant: ModelV2.VariantID.make("high"),
+    })
+  })
+
+  test("rejects a reference that names no provider or no variant", () => {
+    // `parse` would read these as a provider with an empty model id, or as a model id carrying the
+    // suffix, and then look up a model that cannot exist.
+    expect(ModelV2.parseRef("claude-haiku-4-5")).toBeUndefined()
+    expect(ModelV2.parseRef("anthropic/")).toBeUndefined()
+    expect(ModelV2.parseRef("anthropic/claude-haiku-4-5#")).toBeUndefined()
+  })
+})

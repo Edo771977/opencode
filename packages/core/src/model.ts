@@ -38,4 +38,21 @@ export function parse(input: string): { providerID: ProviderV2.ID; modelID: ID }
   }
 }
 
+/**
+ * Parses a written reference, `provider/model` with an optional `#variant`. Callers that read a
+ * reference straight from config need this: `parse` takes a string whose variant has already been
+ * split off, and given `"model#variant"` it would look up a model whose id carries the suffix.
+ * Returns undefined for a reference naming no provider, which `parse` would read as a provider with
+ * an empty model id.
+ */
+export function parseRef(input: string): { providerID: ProviderV2.ID; modelID: ID; variant?: VariantID } | undefined {
+  const separator = input.lastIndexOf("#")
+  const ref = separator === -1 ? input : input.slice(0, separator)
+  const variant = separator === -1 ? undefined : input.slice(separator + 1)
+  if (!ref.includes("/") || variant === "") return undefined
+  const parsed = parse(ref)
+  if (parsed.modelID.length === 0) return undefined
+  return { ...parsed, ...(variant === undefined ? {} : { variant: VariantID.make(variant) }) }
+}
+
 export * as ModelV2 from "./model"
