@@ -161,22 +161,32 @@ const layer = Layer.effect(
 
       // A file half-way through the migration carries both spellings, and one legacy key is enough
       // to send the whole file through the V1 reading, which has nowhere to put the keys only V2
-      // has. Laying those back over the migrated file is the only reading that loses neither half.
+      // has — and rejects outright the shared keys written in their V2 shape. Reading the two
+      // halves apart and laying the authored one back on top is what loses neither.
       const mixed = ConfigMigrateV1.mixed(input)
       if (mixed)
         yield* Effect.logWarning(
-          `${filepath} mixes legacy (${mixed.legacy.join(", ")}) and current (${mixed.current.join(", ")}) configuration keys; the current ones are used as written`,
+          `${filepath} mixes legacy (${mixed.legacy.join(", ")}) and current (${mixed.current.join(", ")}) configuration keys; where both set the same thing the current one wins`,
         )
 
-      const info = Option.getOrUndefined(
-        ConfigMigrateV1.isV1(input)
-          ? decodeV1Info(input).pipe(
-              Option.map(ConfigMigrateV1.migrate),
-              Option.map((migrated) => ({ ...migrated, ...(mixed ? ConfigMigrateV1.overlay(migrated, mixed.value) : {}) })),
-              Option.flatMap(decodeInfo),
-            )
-          : decodeInfo(input),
-      )
+      const info = yield* Effect.gen(function* () {
+        if (!ConfigMigrateV1.isV1(input)) return Option.getOrUndefined(decodeInfo(input))
+        const migrated = Option.getOrUndefined(
+          decodeV1Info(mixed ? mixed.base : input).pipe(Option.map(ConfigMigrateV1.migrate)),
+        )
+        if (!migrated) return undefined
+        if (!mixed) return Option.getOrUndefined(decodeInfo(migrated))
+        const both = Option.getOrUndefined(
+          decodeInfo({ ...migrated, ...ConfigMigrateV1.overlay(migrated, mixed.authored) }),
+        )
+        if (both) return both
+        // Only the authored half is unreadable. Dropping the file for it would take the legacy half
+        // down too, which does decode and is the half this file has always been read by.
+        yield* Effect.logError(
+          `Ignoring ${mixed.current.join(", ")} in ${filepath}: they do not match the configuration schema`,
+        )
+        return Option.getOrUndefined(decodeInfo(migrated))
+      })
       // A file that does not decode is skipped whole — every setting in it, not just the offending
       // one — so say which file it was rather than running as if it did not exist.
       if (!info) {

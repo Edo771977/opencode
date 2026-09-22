@@ -203,8 +203,14 @@ function normalizeExperimental(
     ["experimental", "subagent_depth"],
     diagnostics,
   )
-  if (depth !== undefined)
-    preferLegacy(result, "subagent_depth", depth, ["experimental", "subagent_depth"], diagnostics)
+  if (depth === undefined) return
+  preferLegacy(result, "subagent_depth", depth, ["experimental", "subagent_depth"], diagnostics)
+  // Lowering moves the setting to the key the V1 runtime reads. Leaving the nested spelling behind
+  // as well would hand the runtime the same setting twice, under a key it never looks at.
+  const remaining = decodeRecord(result.experimental)
+  if (Option.isNone(remaining)) return
+  const { subagent_depth: _lowered, ...rest } = remaining.value
+  result.experimental = rest
 }
 
 function normalizeAgents(input: Record<string, unknown>, result: Record<string, unknown>, diagnostics: Diagnostic[]) {

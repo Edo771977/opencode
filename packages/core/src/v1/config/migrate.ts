@@ -68,30 +68,40 @@ export function isV1(input: unknown) {
 /**
  * The keys a half-migrated file carries under each spelling. One legacy key is enough to send the
  * whole file through the V1 reading, which has nowhere to put the keys only V2 has, so a reader has
- * to say which keys it took from which shape and lay the authored ones back on top.
+ * to take the V1 half from `base`, keep the V2 half as `authored`, and say which came from where.
  */
 export function mixed(input: unknown) {
   if (!isRecord(input)) return undefined
   const present = Object.keys(input)
   const legacy = present.filter((key) => keys.has(key) || v1Shapes[key]?.(input[key]) === true)
-  const current = present.filter((key) => v2Keys.has(key))
+  // A key both shapes spell the same counts as current when its shape is not the V1 one: left in,
+  // the V1 parser rejects it and takes the rest of the file down with it.
+  const current = present.filter((key) => v2Keys.has(key) || (key in v1Shapes && v1Shapes[key]?.(input[key]) === false))
   if (!legacy.length || !current.length) return undefined
-  return { legacy, current, value: Object.fromEntries(current.map((key) => [key, input[key]])) }
+  return {
+    legacy,
+    current,
+    authored: Object.fromEntries(current.map((key) => [key, input[key]])),
+    base: Object.fromEntries(Object.entries(input).filter(([key]) => !current.includes(key))),
+  }
 }
 
 /**
- * What a migrated file's keys become once the authored V2 half is laid back over them. Records of
- * named things — agents, providers, commands — merge by name, so a file that moved one agent to the
- * new spelling does not lose the ones still written in the old; anything else is replaced, the
- * authored value being the later of the two.
+ * What a migrated file's keys become once the authored V2 half is laid back over them. Values merge
+ * key by key with the authored one winning, so a file that moved one agent — or one field of one
+ * agent — to the new spelling keeps everything it still writes in the old. Lists replace: two sets
+ * of rules have no meaningful merge.
  */
 export function overlay(migrated: Record<string, unknown>, authored: Record<string, unknown>) {
-  return Object.fromEntries(
-    Object.entries(authored).map(([key, value]) => [
-      key,
-      isRecord(value) && isRecord(migrated[key]) ? { ...migrated[key], ...value } : value,
-    ]),
-  )
+  return Object.fromEntries(Object.entries(authored).map(([key, value]) => [key, merge(migrated[key], value)]))
+}
+
+function merge(migrated: unknown, authored: unknown): unknown {
+  if (!isRecord(migrated) || !isRecord(authored)) return authored
+  return Object.fromEntries([
+    ...Object.entries(migrated).filter(([key]) => !Object.hasOwn(authored, key)),
+    ...Object.entries(authored).map(([key, value]) => [key, merge(migrated[key], value)]),
+  ])
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {
@@ -129,14 +139,18 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     plugins: info.plugin?.map((plugin) =>
       typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
     ),
-    // `subagent_depth` was a top-level V1 key and is nested under `experimental` in V2, which is
-    // the spelling the V1 runtime's own compatibility layer already accepts.
-    experimental:
-      info.experimental?.policies || info.subagent_depth !== undefined
-        ? { policies: info.experimental?.policies, subagent_depth: info.subagent_depth }
-        : undefined,
+    // `subagent_depth` was a top-level V1 key and is nested under `experimental` in V2. Both
+    // spellings are read, the top-level one winning, which is what the V1 runtime's own
+    // compatibility layer does with the same pair.
+    experimental: experimental(info),
     providers: providers(info.provider),
   }
+}
+
+function experimental(info: typeof ConfigV1.Info.Type) {
+  const depth = info.subagent_depth ?? info.experimental?.subagent_depth
+  if (!info.experimental?.policies && depth === undefined) return undefined
+  return { policies: info.experimental?.policies, subagent_depth: depth }
 }
 
 function permissions(info?: ConfigPermissionV1.Info, tools?: Readonly<Record<string, boolean>>) {
@@ -179,6 +193,7 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
   }
   return {
     model: info.model,
+    small: info.small,
     variant: info.variant,
     request: Object.keys(body).length ? { body } : undefined,
     system: info.prompt,
@@ -187,6 +202,8 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     hidden: info.hidden,
     color: info.color,
     steps: info.steps,
+    budget: info.budget,
+    budget_stop: info.budget_stop,
     disabled: info.disable,
     permissions: permissions(info.permission),
   }

@@ -125,17 +125,46 @@ describe("Config", () => {
     }),
   )
 
-  it.effect("carries subagent_depth across the migration", () =>
+  it.effect("carries subagent_depth across the migration under either spelling", () =>
     Effect.sync(() => {
-      // V1 spells it at the top level, V2 under `experimental`, which is the spelling the V1
-      // runtime's compatibility layer already accepts. Without the mapping the setting has no
-      // representation in V2 config at all.
+      // V1 spells it at the top level, V2 under `experimental`. A file that already writes the
+      // nested one is detected as V1 by anything else it contains, so both have to be read here or
+      // the setting has no representation in V2 config at all.
+      const depth = (input: unknown) =>
+        ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)(input, { errors: "all" })).experimental
+          ?.subagent_depth
+
+      expect(depth({ subagent_depth: 3, agent: {} })).toBe(3)
+      expect(depth({ experimental: { subagent_depth: 3 }, agent: {} })).toBe(3)
+      // Both set: the top-level one wins, as the V1 runtime's compatibility layer also decides it.
+      expect(depth({ subagent_depth: 1, experimental: { subagent_depth: 3 }, agent: {} })).toBe(1)
+      expect(depth({ agent: {} })).toBeUndefined()
+
       const migrated = ConfigMigrateV1.migrate(
         Schema.decodeUnknownSync(ConfigV1.Info)({ subagent_depth: 3, agent: {} }, { errors: "all" }),
       )
-      expect(migrated.experimental?.subagent_depth).toBe(3)
       expect(Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" }).experimental?.subagent_depth).toBe(3)
       expect(ConfigMigrateV1.migrate({}).experimental).toBeUndefined()
+    }),
+  )
+
+  it.effect("carries an agent's model selection and spend limits across the migration", () =>
+    Effect.sync(() => {
+      // The property test below only asserts that a migrated file decodes, so a field the migration
+      // forgets to map is invisible to it: `small`, `budget` and `budget_stop` exist in both agent
+      // schemas, and an agent that loses them here is read by V2 as an agent that never set them.
+      const migrated = ConfigMigrateV1.migrate(
+        Schema.decodeUnknownSync(ConfigV1.Info)(
+          { agent: { build: { small: true, budget: 2, budget_stop: 5, prompt: "p" } } },
+          { errors: "all" },
+        ),
+      )
+      expect(migrated.agents?.["build"]).toMatchObject({ small: true, budget: 2, budget_stop: 5, system: "p" })
+      expect(Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" }).agents?.["build"]).toMatchObject({
+        small: true,
+        budget: 2,
+        budget_stop: 5,
+      })
     }),
   )
 
@@ -147,6 +176,11 @@ describe("Config", () => {
       })
       // The V1 shape of a shared key counts as a legacy signal, the same way it decides the reading.
       expect(ConfigMigrateV1.mixed({ skills: { paths: ["./s"] }, agents: {} })?.legacy).toEqual(["skills"])
+      // And its V2 shape counts as a current one: the V1 parser rejects it, and rejecting it takes
+      // the whole file down. `base` is what the V1 parser is given instead.
+      const shared = ConfigMigrateV1.mixed({ agent: {}, mcp: { servers: {} }, skills: ["./s"] })
+      expect(shared).toMatchObject({ legacy: ["agent"], current: ["mcp", "skills"] })
+      expect(shared?.base).toEqual({ agent: {} })
       // One shape alone is not a mix, whichever it is.
       expect(ConfigMigrateV1.mixed({ agent: {} })).toBeUndefined()
       expect(ConfigMigrateV1.mixed({ agents: {} })).toBeUndefined()
@@ -161,10 +195,14 @@ describe("Config", () => {
       expect(
         ConfigMigrateV1.overlay({ agents: { build: { steps: 4 } } }, { agents: { helper: { description: "x" } } }),
       ).toEqual({ agents: { build: { steps: 4 }, helper: { description: "x" } } })
-      // The authored entry wins where both spellings name the same thing.
-      expect(ConfigMigrateV1.overlay({ agents: { build: { steps: 4 } } }, { agents: { build: { steps: 9 } } })).toEqual({
-        agents: { build: { steps: 9 } },
-      })
+      // The authored value wins field by field, so moving one setting of one agent to the new
+      // spelling does not drop the rest of what that agent still says in the old.
+      expect(
+        ConfigMigrateV1.overlay(
+          { agents: { build: { steps: 4, system: "legacy" } } },
+          { agents: { build: { steps: 9 } } },
+        ),
+      ).toEqual({ agents: { build: { steps: 9, system: "legacy" } } })
       // Everything else is replaced: two lists of rules have no meaningful merge.
       expect(ConfigMigrateV1.overlay({ permissions: [{ action: "bash" }] }, { permissions: [] })).toEqual({
         permissions: [],
@@ -387,6 +425,73 @@ describe("Config", () => {
 
             expect(documents[0]?.info.agents?.["helper"]?.description).toBe("current")
             expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps the legacy half when the authored half does not decode", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // Laying the authored half on top means it has to decode. Failing the whole file for it
+          // would drop settings that have always loaded, so only the unreadable half is dropped.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                agent: { build: { prompt: "legacy" } },
+                agents: { helper: { description: 5 } },
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.agents?.["helper"]).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("reads a shared key written in the current shape next to a legacy one", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `mcp` and `skills` are spelled the same in both shapes. One legacy key sends the file to
+          // the V1 parser, which rejects their V2 shape outright — and rejecting it used to take
+          // every other setting in the file with it.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                agent: { build: { prompt: "legacy" } },
+                mcp: { servers: { srv: { type: "remote", url: "https://example.test/mcp" } } },
+                skills: ["./skill"],
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.mcp?.servers?.["srv"]).toMatchObject({ url: "https://example.test/mcp" })
+            expect(documents[0]?.info.skills).toEqual(["./skill"])
           }).pipe(Effect.provide(testLayer(tmp.path)))
         }),
       ),
