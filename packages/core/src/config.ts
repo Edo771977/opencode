@@ -192,9 +192,10 @@ const layer = Layer.effect(
           },
           { value: migrated as Record<string, unknown>, dropped: [] as string[] },
         )
-        yield* Effect.logError(
-          `Ignoring ${applied.dropped.join(", ")} in ${filepath}: they do not match the configuration schema`,
-        )
+        if (applied.dropped.length)
+          yield* Effect.logError(
+            `Ignoring ${applied.dropped.join(", ")} in ${filepath}: they do not match the configuration schema`,
+          )
         return Option.getOrUndefined(decodeInfo(applied.value))
       })
       // A file that does not decode is skipped whole — every setting in it, not just the offending

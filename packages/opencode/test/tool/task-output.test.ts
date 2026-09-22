@@ -104,6 +104,11 @@ describe("TaskOutput.parse", () => {
   test("falls back to the last fenced block only when none is tagged as JSON", () => {
     const fields = [{ name: "summary", description: "what happened" }]
     expect(TaskOutput.parse('```\n{"summary":"done"}\n```', fields)).toMatchObject({ ok: true })
+    // `jsonc` is a tag a subagent reaches for as readily as `json`.
+    expect(TaskOutput.parse('```jsonc\n{"summary":"done"}\n```\n```ts\nconst x = 1\n```', fields)).toMatchObject({
+      ok: true,
+      value: { summary: "done" },
+    })
     // Two JSON blocks: the last one is the answer, the earlier one a draft.
     expect(
       TaskOutput.parse('```json\n{"summary":"draft"}\n```\n```json\n{"summary":"done"}\n```', fields),

@@ -178,6 +178,10 @@ describe("Config", () => {
       expect(ConfigMigrateV1.mixed({ skills: { paths: ["./s"] }, agents: {} })?.legacy).toEqual(["skills"])
       // And its V2 shape counts as a current one: the V1 parser rejects it, and rejecting it takes
       // the whole file down. `base` is what the V1 parser is given instead.
+      // A V2 servers map may hold a server named `type`: what decides is the value, not the key.
+      expect(
+        ConfigMigrateV1.mixed({ agent: {}, mcp: { servers: { type: { type: "local", command: ["x"] } } } }),
+      ).toMatchObject({ current: ["mcp"] })
       const shared = ConfigMigrateV1.mixed({ agent: {}, mcp: { servers: {} }, skills: ["./s"] })
       expect(shared).toMatchObject({ legacy: ["agent"], current: ["mcp", "skills"] })
       expect(shared?.base).toEqual({ agent: {} })
@@ -186,9 +190,11 @@ describe("Config", () => {
       for (const value of [
         { compaction: { auto: false } },
         { mcp: {} },
-        // A V1 server may be named `servers` or `timeout`; its own `type` is what gives it away.
+        // A V1 server may be named `servers` or `timeout`; the entry itself is what gives it away,
+        // whether it names its `type` or only turns an inherited server off.
         { mcp: { timeout: { type: "remote", url: "https://example.test/mcp" } } },
         { mcp: { servers: { type: "remote", url: "https://example.test/mcp" } } },
+        { mcp: { servers: { enabled: false } } },
       ])
         expect(ConfigMigrateV1.mixed({ agent: {}, ...value })).toBeUndefined()
     }),

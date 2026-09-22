@@ -64,16 +64,24 @@ const v1Shapes: Record<string, (value: unknown) => boolean> = {
 const v2Shapes: Record<string, (value: unknown) => boolean> = {
   skills: (value) => Array.isArray(value),
   // Servers live under `servers`, beside an optional `timeout`. A V1 file may name a server
-  // `servers` or `timeout`, and a server entry carries its own `type` — which is what tells the two
-  // readings apart when one of those two names is all that is there.
+  // `servers` or `timeout`, and a V1 server entry is recognisable in itself — which is what tells
+  // the two readings apart when one of those two names is all that is there.
   mcp: (value) =>
     isRecord(value) &&
     Object.keys(value).length > 0 &&
     Object.keys(value).every((key) => key === "servers" || key === "timeout") &&
-    !Object.values(value).some((entry) => isRecord(entry) && Object.hasOwn(entry, "type")),
+    !Object.values(value).some(serverEntry),
   // The budgets V2 renamed. `auto` and `prune` are shared, so they say nothing on their own.
   compaction: (value) => isRecord(value) && (Object.hasOwn(value, "keep") || Object.hasOwn(value, "buffer")),
 }
+
+/**
+ * A V1 MCP server as written: a local or remote server names its `type`, and an entry that only
+ * turns an inherited server off carries `enabled`. Read as values, not as key names — a V2 servers
+ * map may hold a server named `type`, whose value is a server rather than a string.
+ */
+const serverEntry = (value: unknown) =>
+  isRecord(value) && (typeof value.type === "string" || typeof value.enabled === "boolean")
 
 // Guarded lookups: an own `__proto__` key in a parsed file would otherwise resolve to
 // `Object.prototype` and be called.
