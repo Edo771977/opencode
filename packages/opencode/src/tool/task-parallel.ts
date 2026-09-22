@@ -226,7 +226,13 @@ export const TaskParallelTool = Tool.define(
         if (!p.task.output?.length) return text
         const parsed = TaskOutput.parse(text, p.task.output)
         if (!parsed.ok)
-          return yield* Effect.fail(new Error(`Subtask did not return the requested fields: ${parsed.error}`))
+          // Name the session: a fan-out subtask has no resume parameter, so its id is all the caller
+          // has to look at what the work produced before deciding whether to run it again.
+          return yield* Effect.fail(
+            new Error(
+              `Subtask did not return the requested fields (task_id: ${p.session.id}): ${parsed.error}. It answered: ${TaskOutput.excerpt(text)}`,
+            ),
+          )
         return JSON.stringify(parsed.value, null, 2)
       })
 

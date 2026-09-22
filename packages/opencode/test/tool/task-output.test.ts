@@ -53,6 +53,20 @@ describe("TaskOutput.parse", () => {
     expect(TaskOutput.parse('{"summary":"done","files":[]}', fields).ok).toBe(true)
   })
 
+  test("accepts the fence forms a subagent actually writes", () => {
+    // Having done the work and answered correctly, a subagent should not fail the task over how it
+    // spelled the fence.
+    const cases = [
+      '```\n{ "summary": "done", "files": [] }\n```',
+      '```JSON\n{ "summary": "done", "files": [] }\n```',
+      '```json { "summary": "done", "files": [] }```',
+      'Here you go:\n```javascript\n{ "summary": "done", "files": [] }\n```',
+    ]
+    for (const answer of cases) {
+      expect({ answer, ...TaskOutput.parse(answer, fields) }).toMatchObject({ ok: true })
+    }
+  })
+
   test("names the fields the agent left out", () => {
     const parsed = TaskOutput.parse('```json\n{ "summary": "done" }\n```', fields)
     expect(parsed).toEqual({ ok: false, error: "missing field: files" })

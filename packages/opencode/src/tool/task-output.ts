@@ -41,16 +41,26 @@ export function instruction(fields: readonly Field[]) {
   ].join("\n")
 }
 
-/** Takes the last fenced JSON block, or the whole answer when the subagent skipped the fence. */
+/**
+ * Takes the last fenced block, or the whole answer when the subagent skipped the fence. The tag is
+ * optional and case-insensitive, and the block need not span lines: a subagent that did the work and
+ * wrote ```` ``` ```` instead of ```` ```json ```` has not failed the task.
+ */
 function block(text: string) {
-  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)]
+  const fences = [...text.matchAll(/```[a-zA-Z]*[ \t]*\r?\n?([\s\S]*?)```/g)]
   const last = fences.at(-1)
-  return (last ? last[1] : text).trim()
+  return (last?.[1] ?? text).trim()
 }
 
 export type Parsed =
   | { readonly ok: true; readonly value: Record<string, unknown> }
   | { readonly ok: false; readonly error: string }
+
+/** What the subagent actually said, bounded, so a caller can tell a near miss from nonsense. */
+export function excerpt(text: string, limit = 400) {
+  const trimmed = text.trim()
+  return trimmed.length > limit ? `${trimmed.slice(0, limit)}…` : trimmed
+}
 
 export function parse(text: string, fields: readonly Field[]): Parsed {
   const candidate = block(text)

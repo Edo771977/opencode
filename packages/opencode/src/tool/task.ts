@@ -236,7 +236,9 @@ export const TaskTool = Tool.define(
         const parsed = TaskOutput.parse(text, params.output)
         if (!parsed.ok)
           return yield* Effect.fail(
-            new Error(`Subagent did not return the requested fields (task_id: ${nextSession.id}): ${parsed.error}`),
+            new Error(
+              `Subagent did not return the requested fields (task_id: ${nextSession.id}): ${parsed.error}. It answered: ${TaskOutput.excerpt(text)}`,
+            ),
           )
         return JSON.stringify(parsed.value, null, 2)
       })
