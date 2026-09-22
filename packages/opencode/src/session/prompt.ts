@@ -1194,6 +1194,14 @@ const layer = Layer.effect(
           const sameAsSession = candidate?.id === model.id && candidate?.providerID === model.providerID
           const small = candidate && candidate.capabilities.toolcall && !sameAsSession ? candidate : undefined
           const stepModel = small ?? model
+          // A variant written into `small_model` names a setting of that model, so it travels with
+          // it — unlike the session's, which means nothing on another model. Only when the model
+          // resolved is the one that reference names: the small model can come from elsewhere.
+          const configuredSmall = small ? ModelV2.parseRef((yield* config.get()).small_model ?? "") : undefined
+          const smallVariant =
+            small && configuredSmall?.providerID === small.providerID && configuredSmall.modelID === small.id
+              ? configuredSmall.variant
+              : undefined
           const isLastStep = step >= maxSteps || budget.stop
 
           // Sized against the model the request will hit, not the one the session started on: a
@@ -1219,9 +1227,8 @@ const layer = Layer.effect(
             mode: agent.name,
             agent: agent.name,
             // A variant chosen for the session model means nothing on a different one, so a
-            // degraded turn drops it rather than asking the small model for a setting it may not
-            // offer, or worse, one that happens to share a name.
-            variant: small ? undefined : lastUser.model.variant,
+            // degraded turn carries only what `small_model` wrote for the model it moved to.
+            variant: small ? smallVariant : lastUser.model.variant,
             path: { cwd: ctx.directory, root: ctx.worktree },
             cost: 0,
             tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -1342,6 +1349,7 @@ const layer = Layer.effect(
               ],
               tools: stepTools,
               model: stepModel,
+              variant: smallVariant,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
 

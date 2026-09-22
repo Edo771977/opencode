@@ -41,6 +41,8 @@ export type StreamInput = {
   permission?: PermissionV1.Ruleset
   system: string[]
   messages: ModelMessage[]
+  /** The variant to run with when the request does not go to the model the user message names. */
+  variant?: string
   small?: boolean
   tools: Record<string, Tool>
   retries?: number

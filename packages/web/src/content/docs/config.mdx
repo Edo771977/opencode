@@ -372,7 +372,7 @@ You can configure the providers and models you want to use in your OpenCode conf
 }
 ```
 
-The `small_model` option configures a separate model for lightweight tasks like title generation, for any agent that sets [`small`](/docs/agents#small-model), and for an agent that has reached its [`budget`](/docs/agents#budget). By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model. For an agent turn the model must also be able to call tools; one that cannot is skipped, and the agent runs on the session model.
+The `small_model` option configures a separate model for lightweight tasks like title generation, for any agent that sets [`small`](/docs/agents#small-model), and for an agent that has reached its [`budget`](/docs/agents#budget). It may name a variant, as `model` does. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model. For an agent turn the model must also be able to call tools; one that cannot is skipped, and the agent runs on the session model.
 
 Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `setCacheKey`:
 

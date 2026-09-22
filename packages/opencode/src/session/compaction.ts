@@ -397,7 +397,12 @@ const layer = Layer.effect(
         sessionID: input.sessionID,
         mode: "compaction",
         agent: "compaction",
-        variant: userMessage.model.variant,
+        // The compaction agent may carry its own model, and a variant chosen for the session's is
+        // not sent to it. Record what the request will actually use, not what was asked for.
+        variant:
+          model.id === userMessage.model.modelID && model.providerID === userMessage.model.providerID
+            ? userMessage.model.variant
+            : undefined,
         summary: true,
         path: {
           cwd: ctx.directory,

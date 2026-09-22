@@ -2473,7 +2473,10 @@ noLLMServer.instance(
 // budget.test.ts covers the decision; these cover what the decision is for. Every finding the
 // reviews raised against the first budget commit was a step threaded through the wrong model or
 // the wrong tool set, which only a run of the whole loop can catch.
-function budgetCfg(agent: { small?: boolean; steps?: number; budget?: number; budget_stop?: number }) {
+function budgetCfg(
+  agent: { small?: boolean; steps?: number; budget?: number; budget_stop?: number },
+  smallModel = "test/test-small",
+) {
   return (url: string) => {
     const base = providerCfg(url)
     return {
@@ -2495,7 +2498,7 @@ function budgetCfg(agent: { small?: boolean; steps?: number; budget?: number; bu
           },
         },
       },
-      small_model: "test/test-small",
+      small_model: smallModel,
       agent: { build: agent },
     }
   }
@@ -2762,5 +2765,33 @@ it.instance("loop withholds tools on the turn that reaches the step limit", () =
     expect(JSON.stringify(hits[0]?.body)).toContain("MAXIMUM STEPS REACHED")
     expect(hits[0]?.body.tools).toBeUndefined()
     expect(hits[0]?.body.model).toBe("test-model")
+  }),
+)
+
+it.instance("loop runs the small model with the variant small_model names", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5 }, "test/test-small#high"))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    // A variant written next to the model it belongs to is a setting of that model, so it travels
+    // with it — and the record of the turn says the same as the request.
+    expect(hits[0]?.body.model).toBe("test-small")
+    expect(hits[0]?.body.reasoning_effort).toBe("high")
+    expect(result.info.role === "assistant" && result.info.variant).toBe("high")
   }),
 )
