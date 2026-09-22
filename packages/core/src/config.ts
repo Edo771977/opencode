@@ -180,12 +180,22 @@ const layer = Layer.effect(
           decodeInfo({ ...migrated, ...ConfigMigrateV1.overlay(migrated, mixed.authored) }),
         )
         if (both) return both
-        // Only the authored half is unreadable. Dropping the file for it would take the legacy half
-        // down too, which does decode and is the half this file has always been read by.
-        yield* Effect.logError(
-          `Ignoring ${mixed.current.join(", ")} in ${filepath}: they do not match the configuration schema`,
+        // Something in the authored half does not decode. Lay its keys on one at a time so a key
+        // that cannot be read costs its own setting and not the ones written beside it, and so the
+        // error names the keys actually dropped.
+        const applied = mixed.current.reduce(
+          (state, key) => {
+            const next = { ...state.value, ...ConfigMigrateV1.overlay(state.value, { [key]: mixed.authored[key] }) }
+            return Option.isSome(decodeInfo(next))
+              ? { value: next, dropped: state.dropped }
+              : { value: state.value, dropped: [...state.dropped, key] }
+          },
+          { value: migrated as Record<string, unknown>, dropped: [] as string[] },
         )
-        return Option.getOrUndefined(decodeInfo(migrated))
+        yield* Effect.logError(
+          `Ignoring ${applied.dropped.join(", ")} in ${filepath}: they do not match the configuration schema`,
+        )
+        return Option.getOrUndefined(decodeInfo(applied.value))
       })
       // A file that does not decode is skipped whole — every setting in it, not just the offending
       // one — so say which file it was rather than running as if it did not exist.

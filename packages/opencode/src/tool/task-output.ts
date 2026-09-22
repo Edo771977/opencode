@@ -52,7 +52,7 @@ export function instruction(fields: readonly Field[]) {
  */
 function block(text: string) {
   const fences = [...text.matchAll(/```([a-zA-Z0-9_+-]*)[ \t]*\r?\n?([\s\S]*?)```/g)]
-  const json = fences.filter((fence) => /^json5?$/i.test(fence[1] ?? ""))
+  const json = fences.filter((fence) => /^json[5c]?$/i.test(fence[1] ?? ""))
   const chosen = json.at(-1) ?? fences.at(-1)
   return (chosen?.[2] ?? text).trim()
 }

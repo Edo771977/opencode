@@ -479,6 +479,8 @@ describe("Config", () => {
                 model: "anthropic/claude",
                 agent: { build: { prompt: "legacy" } },
                 agents: { helper: { description: 5 } },
+                commands: { review: { template: "Review changes" } },
+                snapshots: false,
               }),
             ),
           )
@@ -490,6 +492,9 @@ describe("Config", () => {
             expect(documents[0]?.info.model).toBe("anthropic/claude")
             expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
             expect(documents[0]?.info.agents?.["helper"]).toBeUndefined()
+            // The keys written beside the unreadable one are readable, and cost nothing for it.
+            expect(documents[0]?.info.commands?.["review"]?.template).toBe("Review changes")
+            expect(documents[0]?.info.snapshots).toBe(false)
           }).pipe(Effect.provide(testLayer(tmp.path)))
         }),
       ),

@@ -1199,7 +1199,13 @@ const layer = Layer.effect(
           // resolved is the one that reference names: the small model can come from elsewhere.
           const configuredSmall = small ? ModelV2.parseRef((yield* config.get()).small_model ?? "") : undefined
           const smallVariant =
-            small && configuredSmall?.providerID === small.providerID && configuredSmall.modelID === small.id
+            small &&
+            configuredSmall?.providerID === small.providerID &&
+            configuredSmall.modelID === small.id &&
+            configuredSmall.variant &&
+            // Only a variant the model actually offers. Recording a name it does not have would
+            // leave the message claiming a setting the request never carried.
+            small.variants?.[configuredSmall.variant]
               ? configuredSmall.variant
               : undefined
           const isLastStep = step >= maxSteps || budget.stop

@@ -2795,3 +2795,32 @@ it.instance("loop runs the small model with the variant small_model names", () =
     expect(result.info.role === "assistant" && result.info.variant).toBe("high")
   }),
 )
+
+it.instance("loop ignores a small_model variant the small model does not offer", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5 }, "test/test-small#bogus"))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    // Nothing is sent for a variant the model does not have, so nothing may be recorded for it
+    // either: a message claiming a setting the request never carried is the disagreement this
+    // whole rule exists to prevent.
+    expect(hits[0]?.body.model).toBe("test-small")
+    expect(hits[0]?.body.reasoning_effort).toBeUndefined()
+    expect(result.info.role === "assistant" && result.info.variant).toBeUndefined()
+  }),
+)
