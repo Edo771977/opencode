@@ -370,6 +370,37 @@ The model ID in your OpenCode config uses the format `provider/model-id`. For ex
 
 ---
 
+### Small model
+
+Set `small` to run this agent on a cheaper, faster model without naming one per agent. Useful for agents whose work is routine enough that the main model is not worth its cost.
+
+```json title="opencode.json"
+{
+  "agent": {
+    "triage": {
+      "description": "Sorts incoming issues",
+      "mode": "subagent",
+      "small": true
+    }
+  }
+}
+```
+
+The model is picked in this order:
+
+1. The [`small_model`](/docs/config#models) option, if you set one.
+2. Otherwise the cheapest recent model of the session's provider that can call tools.
+3. Otherwise the session model, unchanged.
+
+A few things to know:
+
+- `small` applies to every turn the agent takes, not only to short ones. Use the [`model`](#model) option instead when you want a specific model.
+- A model that cannot call tools is never selected, because an agent's turn carries tool definitions.
+- Nothing here can fail a turn: if no suitable small model is available, or its provider is not authorized, the agent runs on the session model.
+- The model that actually answered is the one recorded in the session, so usage and cost are attributed to it.
+
+---
+
 ### Tools (deprecated)
 
 `tools` is **deprecated**. Prefer the agent's [`permission`](#permissions) field for new configs, updates and more fine-grained control.
@@ -600,7 +631,7 @@ Only applies to `mode: subagent` agents.
 
 ### Task permissions
 
-Control which subagents an agent can invoke via the Task tool with `permission.task`. Uses glob patterns for flexible matching.
+Control which subagents an agent can invoke via the Task tool with `permission.task`. Uses glob patterns for flexible matching. The same rules govern the parallel fan-out tool, `task-parallel`, which runs up to five independent subtasks at once in their own subagent sessions.
 
 ```json title="opencode.json"
 {
@@ -620,6 +651,8 @@ Control which subagents an agent can invoke via the Task tool with `permission.t
 ```
 
 When set to `deny`, the subagent is removed from the Task tool description entirely, so the model won't attempt to invoke it.
+
+Subagents do not fan out by default: a subagent is denied `task` and `task-parallel` unless its own permissions grant them, and the `subagent_depth` config still caps nesting. Tools you reserve for primary agents through `experimental.primary_tools` are denied to subagents spawned either way.
 
 :::tip
 Rules are evaluated in order, and the **last matching rule wins**. In the example above, `orchestrator-planner` matches both `*` (deny) and `orchestrator-*` (allow), but since `orchestrator-*` comes after `*`, the result is `allow`.
