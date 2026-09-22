@@ -37,10 +37,30 @@ const v2Keys = new Set(["permissions", "agents", "snapshots", "attachments", "co
  */
 const ambiguous = new Set(["small_model"])
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Keys both shapes spell the same way but fill differently, judged by shape rather than by name.
+ * Reading a V1 shape as V2 loses its contents — every MCP server, the compaction budgets — and for
+ * `skills` fails the decode outright, which makes `loadFile` discard the entire file in silence.
+ */
+const v1Shapes: Record<string, (value: unknown) => boolean> = {
+  // V2 takes a flat list of paths and URLs; V1 an object splitting the two.
+  skills: (value) => isRecord(value),
+  // V2 nests servers under `servers` alongside `timeout`; V1 maps server names at the top level.
+  mcp: (value) => isRecord(value) && Object.keys(value).some((key) => key !== "servers" && key !== "timeout"),
+  // `auto` and `prune` are shared; the budgets were renamed.
+  compaction: (value) =>
+    isRecord(value) && ["tail_turns", "preserve_recent_tokens", "reserved"].some((key) => Object.hasOwn(value, key)),
+}
+
 export function isV1(input: unknown) {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) return false
+  if (!isRecord(input)) return false
   const present = Object.keys(input)
   if (present.some((key) => keys.has(key))) return true
+  if (present.some((key) => v1Shapes[key]?.(input[key]) === true)) return true
   if (present.some((key) => v2Keys.has(key))) return false
   return present.some((key) => ambiguous.has(key))
 }

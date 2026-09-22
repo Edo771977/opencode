@@ -89,6 +89,22 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("classifies keys both shapes share by their shape", () =>
+    Effect.sync(() => {
+      // Read as V2 these lose their contents; `skills` fails the decode outright, which discards the
+      // whole file.
+      expect(ConfigMigrateV1.isV1({ model: "a/b", skills: { paths: ["./s"] } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ model: "a/b", mcp: { ctx7: { type: "remote", url: "https://x" } } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { auto: true, preserve_recent_tokens: 20_000 } })).toBe(true)
+      // The V2 shapes of the same keys stay V2.
+      expect(ConfigMigrateV1.isV1({ model: "a/b", skills: ["./s"] })).toBe(false)
+      expect(
+        ConfigMigrateV1.isV1({ mcp: { servers: { ctx7: { type: "remote", url: "https://x" } }, timeout: 5 } }),
+      ).toBe(false)
+      expect(ConfigMigrateV1.isV1({ compaction: { auto: true, keep: { tokens: 20_000 } } })).toBe(false)
+    }),
+  )
+
   it.effect("keeps v1 shapes when a shared key is the only v1 signal", () =>
     Effect.sync(() => {
       const input = {

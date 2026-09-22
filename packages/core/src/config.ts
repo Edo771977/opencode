@@ -154,14 +154,22 @@ const layer = Layer.effect(
 
       const errors: ParseError[] = []
       const input: unknown = parse(text, errors, { allowTrailingComma: true })
-      if (errors.length) return
+      if (errors.length) {
+        yield* Effect.logError(`Ignoring ${filepath}: it is not valid JSON`)
+        return
+      }
 
       const info = Option.getOrUndefined(
         ConfigMigrateV1.isV1(input)
           ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
           : decodeInfo(input),
       )
-      if (!info) return
+      // A file that does not decode is skipped whole — every setting in it, not just the offending
+      // one — so say which file it was rather than running as if it did not exist.
+      if (!info) {
+        yield* Effect.logError(`Ignoring ${filepath}: it does not match the configuration schema`)
+        return
+      }
       return new Document({ type: "document", path: filepath, info })
     })
 
