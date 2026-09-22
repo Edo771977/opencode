@@ -2,8 +2,12 @@ import { describe, expect, test } from "bun:test"
 import type { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionBudget } from "../../src/session/budget"
 
+let clock = 0
 const turn = (agent: string, cost: number) =>
-  ({ info: { role: "assistant", agent, cost }, parts: [] }) as unknown as SessionV1.WithParts
+  ({
+    info: { role: "assistant", agent, cost, id: `msg_${++clock}`, time: { created: clock } },
+    parts: [],
+  }) as unknown as SessionV1.WithParts
 
 const user = () => ({ info: { role: "user" }, parts: [] }) as unknown as SessionV1.WithParts
 
@@ -61,6 +65,25 @@ describe("SessionBudget.evaluate", () => {
         stop: undefined,
       }),
     ).toMatchObject({ spent: 100, degrade: false, crossed: false, stop: false })
+  })
+
+  test("reads the same turn as the most recent whichever order history arrives in", () => {
+    // `MessageV2.stream` hands back newest first and `filterCompacted` oldest first. Taking the
+    // last element of the list would read the wrong turn in one of the two, which decides nothing
+    // less than whether the agent is told about its budget once, every turn, or never.
+    const spread = [turn("build", 0.9), turn("build", 0.2), turn("build", 0.2)]
+    for (const messages of [spread, [...spread].reverse()])
+      expect(SessionBudget.evaluate({ messages, agent: "build", budget: 1, stop: undefined })).toMatchObject({
+        degrade: true,
+        crossed: false,
+      })
+
+    const crossedNow = [turn("build", 0.1), turn("build", 1)]
+    for (const messages of [crossedNow, [...crossedNow].reverse()])
+      expect(SessionBudget.evaluate({ messages, agent: "build", budget: 1, stop: undefined })).toMatchObject({
+        degrade: true,
+        crossed: true,
+      })
   })
 
   test("a fresh session has spent nothing", () => {

@@ -42,14 +42,19 @@ export function instruction(fields: readonly Field[]) {
 }
 
 /**
- * Takes the last fenced block, or the whole answer when the subagent skipped the fence. The tag is
- * optional and case-insensitive, and the block need not span lines: a subagent that did the work and
- * wrote ```` ``` ```` instead of ```` ```json ```` has not failed the task.
+ * The block the answer's fields are in: the last one tagged as JSON, else the last fenced block of
+ * any kind, else the whole answer.
+ *
+ * The tag decides before the position does. A subagent that writes the required block and then
+ * illustrates its work with a code sample has done the task, and reading that sample as the answer
+ * fails it for the one reason it cannot act on. The untagged fallback is for the opposite case, a
+ * subagent that wrote a bare ```` ``` ```` fence and nothing else.
  */
 function block(text: string) {
-  const fences = [...text.matchAll(/```[a-zA-Z]*[ \t]*\r?\n?([\s\S]*?)```/g)]
-  const last = fences.at(-1)
-  return (last?.[1] ?? text).trim()
+  const fences = [...text.matchAll(/```([a-zA-Z0-9_+-]*)[ \t]*\r?\n?([\s\S]*?)```/g)]
+  const json = fences.filter((fence) => /^json5?$/i.test(fence[1] ?? ""))
+  const chosen = json.at(-1) ?? fences.at(-1)
+  return (chosen?.[2] ?? text).trim()
 }
 
 export type Parsed =

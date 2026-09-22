@@ -1943,8 +1943,10 @@ const layer = Layer.effect(
         // `provider/model#variant` is the form the model option takes, so it is the form people
         // write here too. The variant names a setting of the model, not another model: looking one
         // up under its full reference finds nothing and would silently leave the agent on the
-        // expensive model, which is the opposite of what was asked for.
-        const parsed = parseModel(cfg.small_model.split("#")[0])
+        // expensive model, which is the opposite of what was asked for. Read with the reference
+        // parser the rest of the codebase uses, so a written reference means one thing everywhere.
+        const parsed = ModelV2.parseRef(cfg.small_model)
+        if (!parsed) return undefined
         return yield* getModel(parsed.providerID, parsed.modelID).pipe(
           Effect.catchTag("ProviderModelNotFoundError", () => Effect.succeed(undefined)),
         )

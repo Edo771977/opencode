@@ -268,6 +268,7 @@ const cfg = {
       models: {
         "test-model": {
           id: "test-model",
+          variants: { high: { reasoningEffort: "high" } },
           name: "Test Model",
           attachment: false,
           reasoning: false,
@@ -2472,7 +2473,7 @@ noLLMServer.instance(
 // budget.test.ts covers the decision; these cover what the decision is for. Every finding the
 // reviews raised against the first budget commit was a step threaded through the wrong model or
 // the wrong tool set, which only a run of the whole loop can catch.
-function budgetCfg(agent: { small?: boolean; budget?: number; budget_stop?: number }) {
+function budgetCfg(agent: { small?: boolean; steps?: number; budget?: number; budget_stop?: number }) {
   return (url: string) => {
     const base = providerCfg(url)
     return {
@@ -2483,7 +2484,14 @@ function budgetCfg(agent: { small?: boolean; budget?: number; budget_stop?: numb
           ...base.provider.test,
           models: {
             ...base.provider.test.models,
-            "test-small": { ...base.provider.test.models["test-model"], id: "test-small", name: "Test Small" },
+            "test-small": {
+              ...base.provider.test.models["test-model"],
+              id: "test-small",
+              name: "Test Small",
+              // The same variant name on both models: reasoning variants are generated per model,
+              // so a name shared with the session model says nothing about what it means here.
+              variants: { high: { reasoningEffort: "high" } },
+            },
           },
         },
       },
@@ -2620,4 +2628,139 @@ it.instance(
       yield* Fiber.interrupt(fiber)
     }),
   15_000,
+)
+
+it.instance("loop tells a degraded agent about its budget once, not on every later turn", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 1 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    // The expensive turn crossed the budget and was told so then; the cheap one after it did not.
+    yield* spend(chat.id, 1)
+    yield* spend(chat.id, 0.1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits[0]?.body.model).toBe("test-small")
+    expect(JSON.stringify(hits[0]?.body)).not.toContain("BUDGET REACHED")
+  }),
+)
+
+it.instance("loop tells an agent whose last turn crossed the budget", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 1 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    // The same two turns the other way round: the budget was crossed by the most recent one.
+    yield* spend(chat.id, 0.1)
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    expect(JSON.stringify((yield* llm.hits)[0]?.body)).toContain("BUDGET REACHED")
+  }),
+)
+
+it.instance("loop does not carry the session variant onto the small model", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      variant: "high",
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits[0]?.body.model).toBe("test-small")
+    // Both models happen to offer a variant called "high"; the one chosen for the session model is
+    // a different setting here, and the record of the turn has to agree with what was sent.
+    expect(hits[0]?.body.reasoning_effort).toBeUndefined()
+    expect(result.info.role === "assistant" && result.info.variant).toBeUndefined()
+  }),
+)
+
+it.instance("loop applies the session variant when the turn stays on the session model", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({}))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 0.01)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      variant: "high",
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits[0]?.body.model).toBe("test-model")
+    expect(hits[0]?.body.reasoning_effort).toBe("high")
+  }),
+)
+
+it.instance("loop withholds tools on the turn that reaches the step limit", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ steps: 1 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 0.01)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("summary")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    // The other branch of the last step: the prompt tells the model it may not call tools, so it
+    // is sent none. No budget is configured, so it stays on the session model.
+    expect(JSON.stringify(hits[0]?.body)).toContain("MAXIMUM STEPS REACHED")
+    expect(hits[0]?.body.tools).toBeUndefined()
+    expect(hits[0]?.body.model).toBe("test-model")
+  }),
 )

@@ -90,4 +90,23 @@ describe("TaskOutput.parse", () => {
     ])
     expect(parsed.ok && parsed.value.result).toEqual({ nested: [1, 2] })
   })
+
+  test("takes the JSON block even when another fenced block comes after it", () => {
+    // A subagent that answers and then illustrates its work has done the task; reading the sample
+    // as the answer would fail it for the one reason it cannot act on.
+    const fields = [{ name: "summary", description: "what happened" }]
+    for (const trailing of ["```ts\nconst x = 1\n```", "```diff\n- old\n+ new\n```", "Wrap output in ``` fences."]) {
+      const parsed = TaskOutput.parse(`\`\`\`json\n{"summary":"done"}\n\`\`\`\n${trailing}`, fields)
+      expect(parsed).toMatchObject({ ok: true, value: { summary: "done" } })
+    }
+  })
+
+  test("falls back to the last fenced block only when none is tagged as JSON", () => {
+    const fields = [{ name: "summary", description: "what happened" }]
+    expect(TaskOutput.parse('```\n{"summary":"done"}\n```', fields)).toMatchObject({ ok: true })
+    // Two JSON blocks: the last one is the answer, the earlier one a draft.
+    expect(
+      TaskOutput.parse('```json\n{"summary":"draft"}\n```\n```json\n{"summary":"done"}\n```', fields),
+    ).toMatchObject({ ok: true, value: { summary: "done" } })
+  })
 })

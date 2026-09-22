@@ -27,13 +27,25 @@ export function evaluate(input: {
   readonly budget: number | undefined
   readonly stop: number | undefined
 }): Decision {
-  const costs = input.messages.flatMap((message) =>
-    message.info.role === "assistant" && message.info.agent === input.agent ? [message.info.cost] : [],
+  const turns = input.messages.flatMap((message) =>
+    message.info.role === "assistant" && message.info.agent === input.agent ? [message.info] : [],
   )
-  const spent = costs.reduce((total, cost) => total + cost, 0)
+  const spent = turns.reduce((total, turn) => total + turn.cost, 0)
   // What was spent before the most recent turn, which is how a threshold reached now is told apart
-  // from one reached several turns ago.
-  const before = spent - (costs.at(-1) ?? 0)
+  // from one reached several turns ago. The most recent turn is searched for rather than taken from
+  // the end of the list: history reaches here in whichever order the caller had it, and reading the
+  // wrong turn tells an agent about its budget over and over, or never. Ordered the way the message
+  // store itself orders, by creation time and then by id.
+  const latest = turns.reduce<(typeof turns)[number] | undefined>(
+    (found, turn) =>
+      found === undefined ||
+      turn.time.created > found.time.created ||
+      (turn.time.created === found.time.created && turn.id > found.id)
+        ? turn
+        : found,
+    undefined,
+  )
+  const before = spent - (latest?.cost ?? 0)
   const budget = input.budget
   return {
     spent,

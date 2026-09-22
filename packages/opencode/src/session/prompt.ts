@@ -1188,9 +1188,11 @@ const layer = Layer.effect(
           const candidate = wantsSmall ? yield* provider.getSmallModel(model.providerID) : undefined
           // The same guards the V2 resolver applies: an agent turn carries tool definitions, so a
           // model that cannot call them is no substitute however cheap, and a "small" model that is
-          // the session model changes nothing but the notice the agent would be shown.
-          const small =
-            candidate && candidate.capabilities.toolcall && candidate.id !== model.id ? candidate : undefined
+          // the session model changes nothing but the notice the agent would be shown. The provider
+          // counts as much as the id: the same model id on another provider is a different route,
+          // different credentials and different billing, so it is a real change.
+          const sameAsSession = candidate?.id === model.id && candidate?.providerID === model.providerID
+          const small = candidate && candidate.capabilities.toolcall && !sameAsSession ? candidate : undefined
           const stepModel = small ?? model
           const isLastStep = step >= maxSteps || budget.stop
 

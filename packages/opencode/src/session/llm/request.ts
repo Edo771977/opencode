@@ -77,8 +77,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     system.push(header, rest.join("\n"))
   }
 
+  // A variant is chosen for one model, and the same name on another model is a different setting
+  // or none at all — reasoning variants are generated per model, so the names collide across a
+  // provider. It applies only when the request goes to the model it was chosen for, which is not
+  // the case for a turn moved to the small model.
+  const chosenFor =
+    input.model.id === input.user.model.modelID && input.model.providerID === input.user.model.providerID
   const variant =
-    !input.small && input.model.variants && input.user.model.variant
+    !input.small && chosenFor && input.model.variants && input.user.model.variant
       ? input.model.variants[input.user.model.variant]
       : {}
   const base = input.small
