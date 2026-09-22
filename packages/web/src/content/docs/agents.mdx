@@ -388,14 +388,15 @@ Set `small` to run this agent on a cheaper, faster model without naming one per 
 
 The model is picked in this order:
 
-1. The [`small_model`](/docs/config#models) option, if you set one.
+1. The [`small_model`](/docs/config#models) option, if you set one and it is in your catalog.
 2. Otherwise the cheapest recent model of the session's provider that can call tools.
 3. Otherwise the session model, unchanged.
 
 A few things to know:
 
 - `small` applies to every turn the agent takes, not only to short ones. Use the [`model`](#model) option instead when you want a specific model.
-- A model that cannot call tools is never selected, because an agent's turn carries tool definitions.
+- A model that cannot call tools is never selected, because an agent's turn carries tool definitions. A `small_model` that cannot is skipped outright rather than falling through to step 2, and a warning is logged — the point of naming a model is not to get a different one.
+- `small_model` may name a model from another provider than the session's. Nothing else does that on its own, so keep it in mind if a project-level config sets it.
 - Nothing here can fail a turn: if no suitable small model is available, or its provider is not authorized, the agent runs on the session model.
 - The model that actually answered is the one recorded in the session, so usage and cost are attributed to it.
 
