@@ -17,6 +17,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import { TaskParallelTool } from "../../src/tool/task-parallel"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -623,6 +624,11 @@ describe("tool.task", () => {
             action: "deny",
           },
           {
+            permission: "task-parallel",
+            pattern: "*",
+            action: "deny",
+          },
+          {
             permission: "bash",
             pattern: "*",
             action: "deny",
@@ -1096,6 +1102,91 @@ describe("tool.task", () => {
 
       expect((yield* jobs.get(child.id))?.status).toBe("cancelled")
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
+    }),
+  )
+})
+
+describe("tool.task-parallel", () => {
+  it.instance("execute asks for the task permission once per subtask", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const calls: unknown[] = []
+
+      yield* def.execute(
+        {
+          tasks: [
+            { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+            { description: "read docs", prompt: "summarize the readme", subagent_type: "explore" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: (input) =>
+            Effect.sync(() => {
+              calls.push(input)
+            }),
+        },
+      )
+
+      expect(calls).toEqual([
+        {
+          permission: "task",
+          patterns: ["general"],
+          always: ["*"],
+          metadata: { description: "inspect bug", subagent_type: "general" },
+        },
+        {
+          permission: "task",
+          patterns: ["explore"],
+          always: ["*"],
+          metadata: { description: "read docs", subagent_type: "explore" },
+        },
+      ])
+    }),
+  )
+
+  it.instance("execute fans out to one child session per subtask and denies nested fan-out", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+            { description: "read docs", prompt: "summarize the readme", subagent_type: "explore" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.metadata.subtaskSessions).toHaveLength(2)
+      expect(result.output).toContain("- inspect bug: COMPLETED")
+      expect(result.output).toContain("- read docs: COMPLETED")
+
+      const child = yield* sessions.get(result.metadata.subtaskSessions[0])
+      expect(child.parentID).toBe(chat.id)
+      expect(child.permission).toContainEqual({ permission: "task", pattern: "*", action: "deny" })
+      expect(child.permission).toContainEqual({ permission: "task-parallel", pattern: "*", action: "deny" })
     }),
   )
 })

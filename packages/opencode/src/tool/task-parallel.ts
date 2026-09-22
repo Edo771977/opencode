@@ -8,7 +8,8 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { TaskPromptOps } from "./task"
 import { Config } from "@/config/config"
-import { Effect, Schema } from "effect"
+import { Effect, Exit, Schema } from "effect"
+import { EffectBridge } from "@/effect/bridge"
 import { Database } from "@opencode-ai/core/database/database"
 
 const id = "task-parallel"
@@ -68,6 +69,21 @@ export const TaskParallelTool = Tool.define(
           ),
         )
       }
+
+      // Gate on the `task` permission, not this tool's own id, so existing rules that restrict which
+      // subagents may be spawned govern both spawn paths. Asked sequentially so the user sees one
+      // prompt at a time instead of a burst.
+      yield* Effect.forEach(params.tasks, (task) =>
+        ctx.ask({
+          permission: "task",
+          patterns: [task.subagent_type],
+          always: ["*"],
+          metadata: {
+            description: task.description,
+            subagent_type: task.subagent_type,
+          },
+        }),
+      )
 
       const ops = ctx.extra?.promptOps as TaskPromptOps
       if (!ops) return yield* Effect.fail(new Error("TaskParallelTool requires promptOps in ctx.extra"))
@@ -132,8 +148,17 @@ export const TaskParallelTool = Tool.define(
         { concurrency: "unbounded" },
       )
 
+      // A fan-out that cannot be stopped would leave every child session running after the user
+      // interrupts, so mirror the task tool: cancel all children on abort and on interruption.
+      const runCancel = yield* EffectBridge.make()
+      const cancelAll = Effect.forEach(prepared, (p) => ops.cancel(p.session.id), { discard: true })
+
+      function onAbort() {
+        runCancel.fork(cancelAll)
+      }
+
       // Run all subtasks in parallel; each drives its own subagent session to completion.
-      const outcomes = yield* Effect.forEach(
+      const fanOut = Effect.forEach(
         prepared,
         (p) =>
           Effect.gen(function* () {
@@ -165,6 +190,23 @@ export const TaskParallelTool = Tool.define(
             return { description: p.task.description, state: "completed" as const, text }
           }),
         { concurrency: "unbounded" },
+      )
+
+      const outcomes = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          ctx.abort.addEventListener("abort", onAbort)
+        }),
+        () => fanOut,
+        (_, exit) =>
+          Effect.gen(function* () {
+            if (Exit.hasInterrupts(exit)) yield* cancelAll
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                ctx.abort.removeEventListener("abort", onAbort)
+              }),
+            ),
+          ),
       )
 
       return {
