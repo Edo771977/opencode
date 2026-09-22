@@ -76,6 +76,39 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("lets the rest of the file settle a key both shapes share", () =>
+    Effect.sync(() => {
+      // `small_model` alone leaves the V1 reading in place, which is what keeps the V1 shapes of
+      // `skills`, `mcp` and `compaction` from being decoded as V2 and silently losing data.
+      expect(ConfigMigrateV1.isV1({ small_model: "anthropic/claude-haiku-4-5" })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", skills: { paths: ["./s"] } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", agent: {} })).toBe(true)
+      // A V2-only key settles it the other way, so a V2 file using it keeps its V2 keys.
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", agents: {} })).toBe(false)
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", permissions: [] })).toBe(false)
+    }),
+  )
+
+  it.effect("keeps v1 shapes when a shared key is the only v1 signal", () =>
+    Effect.sync(() => {
+      const input = {
+        small_model: "anthropic/claude-haiku-4-5",
+        skills: { paths: ["./skill"] },
+        mcp: { ctx7: { type: "remote", url: "https://example.test/mcp" } },
+        compaction: { auto: true, preserve_recent_tokens: 20_000 },
+      }
+      expect(ConfigMigrateV1.isV1(input)).toBe(true)
+
+      const migrated = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)(input, { errors: "all" }))
+      expect(migrated.small_model).toBe("anthropic/claude-haiku-4-5")
+      expect(migrated.skills).toEqual(["./skill"])
+      expect(migrated.mcp).toMatchObject({
+        servers: { ctx7: { type: "remote", url: "https://example.test/mcp" } },
+      })
+      expect(migrated.compaction).toMatchObject({ auto: true, keep: { tokens: 20_000 } })
+    }),
+  )
+
   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>
     Effect.sync(() => {
       FastCheck.assert(

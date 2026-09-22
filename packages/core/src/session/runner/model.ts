@@ -6,7 +6,7 @@ import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-message
 import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
 import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Cause, Context, Effect, Layer, Schema } from "effect"
 import { produce } from "immer"
 import { Catalog } from "../../catalog"
 import { Config } from "../../config"
@@ -212,8 +212,18 @@ export const locationLayer = Layer.effect(
       // An explicitly configured `small_model` outranks the catalog's heuristic pick: the user named
       // a model, and silently running a different one is worse than not running a small model at all.
       const small = (yield* configured()) ?? (yield* catalog.model.small(selected.providerID))
-      if (!small || !supported(small) || !small.capabilities.tools) return undefined
-      if (small.id === selected.id) return undefined
+      if (!small) return undefined
+      if (!supported(small) || !small.capabilities.tools) {
+        // Silence here bills the user at the session model's rate for as long as the misconfiguration
+        // lasts, and this runs once per step, so say it once per reason.
+        yield* Effect.logWarning(
+          `Small model ${small.providerID}/${small.id} cannot serve an agent turn; using the session model instead`,
+        )
+        return undefined
+      }
+      // Compare the provider too: the same model id under another provider is a different route,
+      // different credentials and different billing, and declining it would ignore the user's choice.
+      if (small.id === selected.id && small.providerID === selected.providerID) return undefined
       const provider = yield* catalog.provider.get(small.providerID)
       const connection = yield* integrations.connection.active(
         provider?.integrationID ?? Integration.ID.make(small.providerID),
@@ -241,9 +251,19 @@ export const locationLayer = Layer.effect(
           connection ? yield* integrations.connection.resolve(connection) : undefined,
         )
       }),
-      // Opting an agent into the small model must never cost it a turn: an unavailable, unsupported
-      // or unauthorized small model degrades to the session model instead of failing.
-      resolveSmall: (session) => resolveSmallModel(session).pipe(Effect.catchCause(() => Effect.succeed(undefined))),
+      // Opting an agent into the small model must never cost it a turn: an unavailable or
+      // unauthorized small model degrades to the session model instead of failing. Interruption is
+      // not a failure of the small model and must survive, so only non-interrupt causes are caught.
+      resolveSmall: (session) =>
+        resolveSmallModel(session).pipe(
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterruptsOnly(cause),
+            (cause) =>
+              Effect.logWarning(`Could not resolve a small model; using the session model instead`, cause).pipe(
+                Effect.as(undefined),
+              ),
+          ),
+        ),
     })
   }),
 )

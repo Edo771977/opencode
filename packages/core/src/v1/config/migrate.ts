@@ -17,8 +17,6 @@ const keys = new Set([
   "autoshare",
   "disabled_providers",
   "enabled_providers",
-  // `small_model` is not listed: it is a V2 key too, with the same shape and meaning, so a file
-  // that uses it must not be pushed through the V1 parser on its account.
   "mode",
   "agent",
   "provider",
@@ -28,9 +26,23 @@ const keys = new Set([
   "layout",
 ])
 
+/** Keys only the V2 shape has. Their presence rules a file out of the V1 reading. */
+const v2Keys = new Set(["permissions", "agents", "snapshots", "attachments", "commands", "plugins", "providers"])
+
+/**
+ * `small_model` belongs to both shapes, so on its own it says nothing about which one a file is,
+ * and either reading loses data for the other: V1 files lean on it to keep the V1 reading of
+ * `mcp`, `skills` and `compaction`, while a V2 file sent through the V1 parser drops every key in
+ * `v2Keys`. Let the rest of the file settle it.
+ */
+const ambiguous = new Set(["small_model"])
+
 export function isV1(input: unknown) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return false
-  return Object.keys(input).some((key) => keys.has(key))
+  const present = Object.keys(input)
+  if (present.some((key) => keys.has(key))) return true
+  if (present.some((key) => v2Keys.has(key))) return false
+  return present.some((key) => ambiguous.has(key))
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {
