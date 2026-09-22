@@ -318,6 +318,27 @@ it.instance(
 )
 
 it.instance(
+  "agent budget config sets the soft threshold and the optional ceiling",
+  () =>
+    Effect.gen(function* () {
+      const build = yield* load((svc) => svc.get("build"))
+      const plan = yield* load((svc) => svc.get("plan"))
+      expect(build?.budget).toBe(2.5)
+      // The ceiling is off unless asked for: a budget alone degrades, it does not stop.
+      expect(build?.budgetStop).toBeUndefined()
+      expect(plan?.budgetStop).toBe(10)
+    }),
+  {
+    config: {
+      agent: {
+        build: { budget: 2.5 },
+        plan: { budget: 5, budget_stop: 10 },
+      },
+    },
+  },
+)
+
+it.instance(
   "agent mode can be overridden",
   () =>
     Effect.gen(function* () {

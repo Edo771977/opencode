@@ -314,6 +314,37 @@ The legacy `maxSteps` field is deprecated. Use `steps` instead.
 
 ---
 
+### Budget
+
+Use `budget` to cap what an agent spends, in US dollars, within a session. It does not stop the agent: once the threshold is reached, the remaining turns run on the [small model](#small-model) and the agent is told once that it is working on what is left of its budget.
+
+```json title="opencode.json"
+{
+  "agent": {
+    "build": {
+      "budget": 5
+    },
+    "researcher": {
+      "mode": "subagent",
+      "budget": 0.5,
+      "budget_stop": 2
+    }
+  }
+}
+```
+
+That is the deliberate default: a run meant to carry a piece of work to the end should not depend on someone noticing that it halted. A budget makes an agent cheaper, not absent.
+
+`budget_stop` is the ceiling, and it does stop: the agent gets one text-only turn to summarize what it did and what is left. It is off unless you set it. It suits a subagent, whose caller reads the partial result and decides what to do next — retry it differently, split the work, or do it itself. On a primary agent it ends the run and waits for you, so set it only if that is what you want.
+
+Both are counted per agent per session, so switching agents mid-session gives each its own budget, and a subagent's session carries only its own work. An agent with no `budget` is never degraded.
+
+:::note
+Spend is measured from the usage each provider reports. A local model that reports no cost never reaches a budget.
+:::
+
+---
+
 ### Disable
 
 Set to `true` to disable the agent.

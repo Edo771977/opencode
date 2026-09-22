@@ -17,6 +17,8 @@ import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
+import { SessionBudgetPrompt } from "@opencode-ai/core/session/runner/budget"
+import { SessionBudget } from "./budget"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
@@ -1176,7 +1178,18 @@ const layer = Layer.effect(
             throw error
           }
           const maxSteps = agent.steps ?? Infinity
-          const isLastStep = step >= maxSteps
+          // A budget changes how the agent works, not whether it does: past the soft threshold the
+          // rest of the session runs on the cheap model, and only an explicitly configured ceiling
+          // ends the run. See SessionBudget.
+          const budget = SessionBudget.evaluate({
+            messages: msgs,
+            agent: agent.name,
+            budget: agent.budget,
+            stop: agent.budgetStop,
+          })
+          const small = budget.degrade && !budget.stop ? yield* provider.getSmallModel(model.providerID) : undefined
+          const stepModel = small ?? model
+          const isLastStep = step >= maxSteps || budget.stop
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),
@@ -1193,8 +1206,8 @@ const layer = Layer.effect(
             path: { cwd: ctx.directory, root: ctx.worktree },
             cost: 0,
             tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-            modelID: model.id,
-            providerID: model.providerID,
+            modelID: stepModel.id,
+            providerID: stepModel.providerID,
             time: { created: Date.now() },
             sessionID,
           }
@@ -1278,10 +1291,28 @@ const layer = Layer.effect(
               system,
               messages: [
                 ...modelMsgs,
-                ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
+                ...(isLastStep
+                  ? [
+                      {
+                        role: "assistant" as const,
+                        content: budget.stop ? SessionBudgetPrompt.EXHAUSTED_PROMPT : MAX_STEPS_PROMPT,
+                      },
+                    ]
+                  : budget.crossed && agent.budget !== undefined
+                    ? [
+                        {
+                          role: "assistant" as const,
+                          content: SessionBudgetPrompt.notice({
+                            spent: budget.spent,
+                            budget: agent.budget,
+                            model: small?.id,
+                          }),
+                        },
+                      ]
+                    : []),
               ],
               tools,
-              model,
+              model: stepModel,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
 

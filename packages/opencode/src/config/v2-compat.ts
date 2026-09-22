@@ -74,6 +74,8 @@ const Agent = Schema.Struct({
   hidden: Schema.optional(Schema.Boolean),
   color: Schema.optional(Schema.String.check(Schema.isPattern(/^#[0-9a-fA-F]{6}$/))),
   steps: Schema.optional(PositiveInt),
+  budget: Schema.optional(Schema.Finite),
+  budget_stop: Schema.optional(Schema.Finite),
   disabled: Schema.optional(Schema.Boolean),
 })
 const Command = Schema.Struct({
@@ -395,7 +397,7 @@ function lowerServer(input: Schema.Schema.Type<typeof Server>) {
 
 function lowerAgent(input: Schema.Schema.Type<typeof Agent>) {
   const result: Record<string, unknown> = {}
-  for (const key of ["description", "mode", "hidden", "color", "steps"] as const) {
+  for (const key of ["description", "mode", "hidden", "color", "steps", "budget", "budget_stop"] as const) {
     if (input[key] !== undefined) result[key] = input[key]
   }
   if (input.system !== undefined) result.prompt = input.system
