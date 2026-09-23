@@ -66,6 +66,16 @@ export const Parameters = Schema.Struct({
   }),
 })
 
+/**
+ * What a caller has to be told when a subagent ends its turn with work it started still running.
+ * Such a task delivers its result into the subagent's own session, so reporting the subagent as
+ * simply done would hand the caller a result that is missing a piece and no way to know it.
+ */
+export function leftRunning(count: number, sessionID: SessionID) {
+  if (count === 0) return undefined
+  return `This agent ended its turn with ${count === 1 ? "a task" : `${count} tasks`} still running in the background. Their results are delivered to its own session (task_id: ${sessionID}) and do not come back here; read that session if you need them.`
+}
+
 function renderOutput(input: {
   sessionID: SessionID
   state: "running" | "completed" | "error"
@@ -357,10 +367,17 @@ export const TaskTool = Tool.define(
             if (result?.metadata?.background === true) return backgroundResult()
             if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
             if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
+            const pending = (yield* background.list()).filter(
+              (job) => job.metadata?.parentSessionId === nextSession.id && job.status === "running",
+            )
             return {
               title: params.description,
               metadata,
-              output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+              output: renderOutput({
+                sessionID: nextSession.id,
+                state: "completed",
+                text: [result?.output ?? "", leftRunning(pending.length, nextSession.id)].filter(Boolean).join("\n\n"),
+              }),
             }
           }),
         (_, exit) =>

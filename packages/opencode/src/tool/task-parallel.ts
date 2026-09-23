@@ -8,7 +8,7 @@ import { Agent } from "../agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import { TaskOutput } from "./task-output"
-import type { TaskPromptOps } from "./task"
+import { leftRunning, type TaskPromptOps } from "./task"
 import { Config } from "@/config/config"
 import { Effect, Exit, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
@@ -255,8 +255,18 @@ export const TaskParallelTool = Tool.define(
               run: runSubtask(p).pipe(Effect.onInterrupt(() => ops.cancel(p.session.id))),
             })
             const info = (yield* background.wait({ id: p.session.id })).info
+            // A subtask's own job settling does not mean the subtask is finished: it may have
+            // started a task of its own in the background, whose result goes to its session and
+            // not to this summary. Say so rather than reporting a result that is missing a piece.
+            const pending = (yield* background.list()).filter(
+              (job) => job.metadata?.parentSessionId === p.session.id && job.status === "running",
+            )
             if (info?.status === "completed")
-              return { description: p.task.description, state: "completed" as const, text: info.output ?? "" }
+              return {
+                description: p.task.description,
+                state: "completed" as const,
+                text: [info.output ?? "", leftRunning(pending.length, p.session.id)].filter(Boolean).join("\n\n"),
+              }
             if (info?.status === "cancelled")
               return { description: p.task.description, state: "cancelled" as const, text: "Subtask cancelled" }
             // Anything else is a subtask whose result we do not have: an error, a job that is somehow

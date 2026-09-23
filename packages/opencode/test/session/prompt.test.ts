@@ -2942,18 +2942,72 @@ backgroundSubagents.instance(
       const jobs = yield* background.list()
       const nested = jobs.find((job) => job.type === "task")
 
-      // This records what the fan-out does today, not what it should do. The subtask is reported as
-      // COMPLETED and the caller is handed the child's last words, while the task that child started
-      // is still running — and its result, when it arrives, is injected into the child's session,
-      // which nobody reads once the fan-out has answered. Upstream is fixing the same shape for its
-      // own runner in anomalyco/opencode#49305 by running a subagent to quiescence before reading
-      // its answer. Whoever closes this here should expect these assertions to change.
+      // The fan-out does not wait for what a subtask left running — `background: true` is a request
+      // to detach, and honouring it inside a fan-out would make it meaningless. What it must not do
+      // is hand the caller a result that is missing a piece without saying so: the nested task's
+      // answer is delivered to the subtask's own session, not to this summary. Upstream takes the
+      // other road for its own runner in anomalyco/opencode#49305, running a subagent to quiescence
+      // before reading its answer.
+      const output = summary?.type === "tool" && summary.state.status === "completed" ? summary.state.output : ""
       expect(result.info.role === "assistant" && result.info.finish).toBe("stop")
-      expect(summary?.type === "tool" && summary.state.status === "completed" && summary.state.output).toContain(
-        "nested: COMPLETED",
-      )
+      expect(output).toContain("nested: COMPLETED")
+      expect(output).toContain("a task still running in the background")
+      expect(output).toContain(nested?.metadata?.parentSessionId as string)
       expect(nested?.status).toBe("running")
       expect(jobs.find((job) => job.type === "task-parallel")?.status).toBe("completed")
+
+      if (nested) yield* background.cancel(nested.id)
+    }),
+  30_000,
+)
+
+backgroundSubagents.instance(
+  "a single subagent says when it ends its turn with work still running",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(fanOutCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const background = yield* BackgroundJob.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* llm.toolMatch(serving("MARKER-BUILD"), "task", {
+        description: "nested",
+        prompt: "start background work",
+        subagent_type: "helper",
+      })
+      yield* llm.toolMatch(serving("MARKER-HELPER"), "task", {
+        description: "grandchild",
+        prompt: "long running work",
+        subagent_type: "general",
+        background: true,
+      })
+      yield* llm.pushMatch(serving("MARKER-GENERAL"), reply().hang().item())
+      yield* llm.textMatch(serving("MARKER-HELPER"), "child done")
+      yield* llm.textMatch(serving("MARKER-BUILD"), "parent done")
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "delegate please" }],
+      })
+
+      yield* prompt.loop({ sessionID: chat.id })
+      const call = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .findLast((part) => part.type === "tool" && part.tool === "task")
+      const nested = (yield* background.list()).find((job) => job.metadata?.background === true)
+
+      // The single-task path tells the same truth as the fan-out: the subagent's turn is over, and
+      // the task it started is not.
+      const output = call?.type === "tool" && call.state.status === "completed" ? call.state.output : ""
+      expect(output).toContain("child done")
+      expect(output).toContain("a task still running in the background")
+      expect(nested?.status).toBe("running")
 
       if (nested) yield* background.cancel(nested.id)
     }),
