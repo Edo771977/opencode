@@ -75,6 +75,7 @@ jobs:
         run: GITHUB_ACTIONS=false bun turbo test --concurrency=2
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+          OPENCODE_SDK_SKIP_GENERATE: ${{ runner.os == 'Windows' && '1' || '0' }}
 
       - name: Check generated client
         if: runner.os == 'Linux'
@@ -144,8 +145,8 @@ jobs:
         run: bun --cwd packages/app test:e2e:local
         env:
           CI: true
-          PLAYWRIGHT_WORKERS: ${{ runner.os == 'Linux' && '2' || '5' }}
-        timeout-minutes: 30
+          PLAYWRIGHT_WORKERS: ${{ runner.os == 'Linux' && '2' || '3' }}
+        timeout-minutes: 40
 
       - name: Upload Playwright artifacts
         if: always()

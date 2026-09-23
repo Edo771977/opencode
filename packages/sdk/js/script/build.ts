@@ -9,6 +9,14 @@ import path from "path"
 
 import { createClient } from "@hey-api/openapi-ts"
 
+// Windows CI compiles the committed generated sources. OpenAPI generation
+// stalls in the Windows GitHub runner; Linux CI still regenerates them.
+if (process.env.OPENCODE_SDK_SKIP_GENERATE === "1") {
+  await $`rm -rf dist`
+  await $`bun tsc`
+  process.exit(0)
+}
+
 const opencode = path.resolve(dir, "../../opencode")
 
 await $`bun dev generate > ${dir}/openapi.json`.cwd(opencode)

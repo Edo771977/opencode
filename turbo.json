@@ -8,6 +8,10 @@
       "dependsOn": [],
       "outputs": ["dist/**"]
     },
+    "@opencode-ai/sdk#build": {
+      "env": ["OPENCODE_SDK_SKIP_GENERATE"],
+      "outputs": ["dist/**"]
+    },
     "@opencode-ai/plugin#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
