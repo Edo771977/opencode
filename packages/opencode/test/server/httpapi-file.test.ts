@@ -60,6 +60,11 @@ describe("file HttpApi", () => {
       request(FilePaths.findText, tmp.path, { pattern: "needle" }),
       request(FilePaths.findSymbol, tmp.path, { query: "hello" }),
     ])
+    if (text.status !== 200 || symbols.status !== 200) {
+      throw new Error(
+        `findText HTTP ${text.status}: ${(await text.text()).slice(0, 300)}; findSymbol HTTP ${symbols.status}: ${(await symbols.text()).slice(0, 300)}`,
+      )
+    }
     const files = await Effect.runPromise(
       pollWithTimeout(
         Effect.promise(async () => {
