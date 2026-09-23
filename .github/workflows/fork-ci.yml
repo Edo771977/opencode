@@ -1,0 +1,40 @@
+name: fork-ci
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-bun
+      - run: bun typecheck
+
+  opencode-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-bun
+      - name: Test changed agent and provider paths
+        working-directory: packages/opencode
+        run: |
+          bun test test/agent/agent.test.ts test/provider/provider.test.ts test/provider/transform.test.ts test/session/budget.test.ts test/session/prompt.test.ts test/tool/task-output.test.ts test/tool/task-parallel.test.ts test/tool/task.test.ts
+
+  core-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-bun
+      - name: Test changed core paths
+        working-directory: packages/core
+        run: |
+          bun test test/catalog.test.ts test/config/agent.test.ts test/config/config.test.ts test/model.test.ts test/session-runner-model.test.ts test/session-runner.test.ts
