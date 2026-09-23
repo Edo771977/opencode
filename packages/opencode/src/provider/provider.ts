@@ -1882,7 +1882,8 @@ const layer = Layer.effect(
         return yield* new ModelNotFoundError({ providerID, modelID, suggestions })
       }
 
-      const info = provider.models[modelID]
+      // `hasOwn`, or a model named `constructor` resolves on any object and is used as a model.
+      const info = Object.hasOwn(provider.models, modelID) ? provider.models[modelID] : undefined
       if (!info) {
         const current = modelSuggestions(provider, modelID, runtimeFlags.enableExperimentalModels)
         const suggestions = current.length

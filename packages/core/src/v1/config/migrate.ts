@@ -49,8 +49,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const v1Shapes: Record<string, (value: unknown) => boolean> = {
   // V2 takes a flat list of paths and URLs; V1 an object splitting the two.
   skills: (value) => isRecord(value),
-  // V2 nests servers under `servers` alongside `timeout`; V1 maps server names at the top level.
-  mcp: (value) => isRecord(value) && Object.keys(value).some((key) => key !== "servers" && key !== "timeout"),
+  // V2 nests servers under `servers` alongside `timeout`; V1 maps server names at the top level —
+  // including, in a V1 file, servers that happen to be named `servers` or `timeout`.
+  mcp: (value) =>
+    isRecord(value) &&
+    (Object.keys(value).some((key) => key !== "servers" && key !== "timeout") ||
+      Object.values(value).some(serverEntry)),
   // `auto` and `prune` are shared; the budgets were renamed.
   compaction: (value) =>
     isRecord(value) && ["tail_turns", "preserve_recent_tokens", "reserved"].some((key) => Object.hasOwn(value, key)),
@@ -90,6 +94,33 @@ const shapedV1 = (input: Record<string, unknown>, key: string) =>
 
 const shapedV2 = (input: Record<string, unknown>, key: string) =>
   Object.hasOwn(v2Shapes, key) && v2Shapes[key]?.(input[key]) === true
+
+/**
+ * Keys a reader has to drop together, because the migration folds them into one setting and keeping
+ * one half would mean something the file does not say. A V1 file writes tool allowances as `tools`
+ * and qualifies them in `permission`, and both become one ruleset: dropping the half that denies
+ * while keeping the half that allows leaves the file more permissive than it reads. The other two
+ * are fallbacks, where dropping the key that was written promotes the one it overrode — turning on
+ * automatic sharing, or restoring a deprecated spelling, neither of which the file asked for.
+ */
+const folded = [
+  ["permission", "tools"],
+  ["share", "autoshare"],
+  ["references", "reference"],
+]
+
+/** The keys of a file in the units a reader may keep or drop, in the order they were written. */
+export function groups(present: readonly string[]) {
+  const taken = new Set<string>()
+  return present.flatMap((key) => {
+    if (taken.has(key)) return []
+    const fold = folded.find((group) => group.includes(key))
+    if (!fold) return [[key]]
+    const group = present.filter((item) => fold.includes(item))
+    for (const item of group) taken.add(item)
+    return [group]
+  })
+}
 
 export function isV1(input: unknown) {
   if (!isRecord(input)) return false

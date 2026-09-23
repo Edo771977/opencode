@@ -169,32 +169,45 @@ const layer = Layer.effect(
           `${filepath} mixes legacy (${mixed.legacy.join(", ")}) and current (${mixed.current.join(", ")}) configuration keys; where both set the same thing the current one wins`,
         )
 
+      // A file reads as a whole in the ordinary case, and group by group when it does not: a
+      // setting written wrongly costs itself rather than taking every other setting in the file
+      // down with it. Groups, not keys, because the migration folds some keys into one setting and
+      // keeping half of such a pair would mean something the file does not say.
+      const salvage = <A>(source: Record<string, unknown>, decode: (value: unknown) => Option.Option<A>) => {
+        const whole = decode(source)
+        if (Option.isSome(whole)) return { value: Option.getOrUndefined(whole), dropped: [] as string[] }
+        const present = Object.keys(source)
+        return ConfigMigrateV1.groups(present).reduce(
+          (state, group) => {
+            const raw = { ...state.raw, ...Object.fromEntries(group.map((key) => [key, source[key]])) }
+            const decoded = decode(raw)
+            return Option.isSome(decoded)
+              ? { raw, value: Option.getOrUndefined(decoded), dropped: state.dropped }
+              : { raw: state.raw, value: state.value, dropped: [...state.dropped, ...group] }
+          },
+          {
+            raw: {} as Record<string, unknown>,
+            // Nothing readable left is a file that does not decode, not an empty one: an empty
+            // decode succeeds for every schema here, and would turn the file into a document that
+            // says nothing instead of one that is skipped.
+            value: present.length ? undefined : Option.getOrUndefined(decode({})),
+            dropped: [] as string[],
+          },
+        )
+      }
+      const report = (dropped: readonly string[]) =>
+        dropped.length
+          ? Effect.logError(`Ignoring ${dropped.join(", ")} in ${filepath}: they do not match the configuration schema`)
+          : Effect.void
+
       const info = yield* Effect.gen(function* () {
-        if (!ConfigMigrateV1.isV1(input)) return Option.getOrUndefined(decodeInfo(input))
-        // The legacy half reads as a whole in the ordinary case, and one key at a time when it does
-        // not: a setting written wrongly costs itself, the same as one in the authored half, rather
-        // than taking every other setting in the file down with it.
-        const source = mixed ? mixed.base : (input as Record<string, unknown>)
-        const whole = decodeV1Info(source)
-        const legacy = Option.isSome(whole)
-          ? { value: whole.value, dropped: [] as string[] }
-          : Object.keys(source).reduce(
-              (state, key) => {
-                const decoded = decodeV1Info({ ...state.raw, [key]: source[key] })
-                return Option.isSome(decoded)
-                  ? { raw: { ...state.raw, [key]: source[key] }, value: decoded.value, dropped: state.dropped }
-                  : { raw: state.raw, value: state.value, dropped: [...state.dropped, key] }
-              },
-              {
-                raw: {} as Record<string, unknown>,
-                value: Option.getOrUndefined(decodeV1Info({})),
-                dropped: [] as string[],
-              },
-            )
-        if (legacy.dropped.length)
-          yield* Effect.logError(
-            `Ignoring ${legacy.dropped.join(", ")} in ${filepath}: they do not match the configuration schema`,
-          )
+        if (!ConfigMigrateV1.isV1(input)) {
+          const current = salvage(input as Record<string, unknown>, decodeInfo)
+          yield* report(current.dropped)
+          return current.value
+        }
+        const legacy = salvage(mixed ? mixed.base : (input as Record<string, unknown>), decodeV1Info)
+        yield* report(legacy.dropped)
         const migrated = legacy.value && ConfigMigrateV1.migrate(legacy.value)
         if (!migrated) return undefined
         if (!mixed) return Option.getOrUndefined(decodeInfo(migrated))
@@ -214,10 +227,7 @@ const layer = Layer.effect(
           },
           { value: migrated as Record<string, unknown>, dropped: [] as string[] },
         )
-        if (applied.dropped.length)
-          yield* Effect.logError(
-            `Ignoring ${applied.dropped.join(", ")} in ${filepath}: they do not match the configuration schema`,
-          )
+        yield* report(applied.dropped)
         return Option.getOrUndefined(decodeInfo(applied.value))
       })
       // A file that does not decode is skipped whole — every setting in it, not just the offending

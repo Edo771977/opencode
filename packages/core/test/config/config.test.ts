@@ -210,6 +210,9 @@ describe("Config", () => {
       expect(ConfigMigrateV1.isV1({ small_model: "a/b", compaction: { keep: { tokens: 5 } } })).toBe(false)
       // A legacy key still decides it, and the shared key is then taken from the file as authored.
       expect(ConfigMigrateV1.isV1({ agent: {}, skills: ["./s"] })).toBe(true)
+      // A V1 file may hold nothing but MCP servers, and one of them may be named `servers`.
+      expect(ConfigMigrateV1.isV1({ model: "a/b", mcp: { servers: { type: "local", command: ["x"] } } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ model: "a/b", mcp: { timeout: { enabled: false } } })).toBe(true)
     }),
   )
 
@@ -533,6 +536,76 @@ describe("Config", () => {
 
             expect(documents[0]?.info.model).toBe("anthropic/claude")
             expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.skills).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("never keeps the half of a permission pair that allows without the half that denies", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `denied` is not an action a rule may take — a typo for `deny`. V1 writes allowances in
+          // `tools` and qualifies them in `permission`, and both become one ruleset: keeping the
+          // allowance while dropping the denial would leave this file more permissive than written.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                tools: { bash: true },
+                permission: { bash: { "rm *": "denied" } },
+                share: "sometimes",
+                autoshare: true,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.permissions).toBeUndefined()
+            // The same pairing protects a fallback: dropping the key that was written would let the
+            // one it overrides through, turning on automatic sharing nobody asked for.
+            expect(documents[0]?.info.share).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps the rest of a current-shape file when one of its keys is written wrongly", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // The shape people are moving to deserves the rule the legacy one gets.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                agents: { build: { system: "current" } },
+                skills: 5,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("current")
             expect(documents[0]?.info.skills).toBeUndefined()
           }).pipe(Effect.provide(testLayer(tmp.path)))
         }),

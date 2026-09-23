@@ -258,13 +258,18 @@ export const locationLayer = Layer.effect(
       // A variant the model does not offer is a mistake in one word of the reference, and refusing
       // the small model over it would quietly stop an agent degrading and leave it paying full
       // price for the rest of the session. The model is used without it, said once.
-      const variant = chosen.variant && small.variants.some((item) => item.id === chosen.variant)
-      if (chosen.variant && !variant)
+      // `default` is not a variant of its own but the name for the model's own, which `withVariant`
+      // resolves; anything else has to be in the model's list.
+      const offered =
+        chosen.variant === undefined ||
+        chosen.variant === "default" ||
+        small.variants.some((item) => item.id === chosen.variant)
+      if (!offered)
         yield* warnOnce(
           `variant:${small.providerID}/${small.id}#${chosen.variant}`,
-          `Small model ${small.providerID}/${small.id} does not offer the variant "${chosen.variant}"; using it without one`,
+          `Small model ${small.providerID}/${small.id} does not offer the variant "${chosen.variant}"; using its own default instead`,
         )
-      return yield* withVariant(small, variant ? chosen.variant : undefined).pipe(
+      return yield* withVariant(small, offered ? chosen.variant : undefined).pipe(
         Effect.flatMap((model) => fromCatalogModel(model, credential)),
       )
     })

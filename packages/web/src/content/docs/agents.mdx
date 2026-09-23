@@ -434,7 +434,7 @@ A few things to know:
 - A model that cannot call tools is never selected, because an agent's turn carries tool definitions.
 - A small model that resolves to the session's own model changes nothing, and is treated as if none were available.
 - `small_model` may name a model from another provider than the session's. Nothing else does that on its own, so keep it in mind if a project-level config sets it.
-- The session's variant is never carried over; a variant written into `small_model` is, when that model offers it. A variant is chosen for one model, and the same name on another is a different setting or none at all — so the turn is sent with the variant written next to the model it moved to, and with nothing otherwise.
+- The session's variant is never carried over; a variant written into `small_model` is, when that model offers it. A variant is chosen for one model, and the same name on another is a different setting or none at all — so the turn is sent with the variant written next to the model it moved to, and otherwise with that model's own default.
 - A value that is not a `provider/model` reference, or that names a model you do not have, is ignored rather than silently reshaping the request.
 - A missing small model never fails a turn: if none is available, or its provider is not authorized, the agent runs on the session model.
 - The model that actually answered is the one recorded in the session, so usage and cost are attributed to it.

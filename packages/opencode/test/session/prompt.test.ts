@@ -369,14 +369,14 @@ const succeedVoid = (deferred: Deferred.Deferred<void>) => {
   Effect.runSync(Deferred.succeed(deferred, void 0).pipe(Effect.ignore))
 }
 
-const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string) {
+const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string, variant?: string) {
   const session = yield* Session.Service
   const msg = yield* session.updateMessage({
     id: MessageID.ascending(),
     role: "user",
     sessionID,
     agent: "build",
-    model: ref,
+    model: variant ? { ...ref, variant } : ref,
     time: { created: Date.now() },
   })
   yield* session.updatePart({
@@ -2848,5 +2848,27 @@ it.instance("loop ignores a small_model variant that is only an inherited proper
     // `constructor` resolves on every object: a name is a variant only if the model declares it.
     expect(hits[0]?.body.model).toBe("test-small")
     expect(result.info.role === "assistant" && result.info.variant).toBeUndefined()
+  }),
+)
+
+it.instance("subtask message records the session variant only when it runs the session model", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({}))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* llm.text("done")
+    const msg = yield* user(chat.id, "hello", "high")
+    // The wrapper message is attributed to the task's model, which is not the session's here.
+    yield* addSubtask(chat.id, msg.id, {
+      providerID: ProviderV2.ID.make("test"),
+      modelID: ModelV2.ID.make("test-small"),
+    })
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+    const wrapper = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+    expect(wrapper?.info.role === "assistant" && wrapper.info.modelID).toBe("test-small")
+    expect(wrapper?.info.role === "assistant" && wrapper.info.variant).toBeUndefined()
   }),
 )
