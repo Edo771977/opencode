@@ -37,7 +37,7 @@ export const ripgrepLayer = Layer.effect(
       .find({
         cwd: location.directory,
         pattern: "*",
-        limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
+        limit: location.vcs ? 1_000_000 : 100_000,
         onEntry: (entry) =>
           Effect.sync(() => {
             state.files.push(entry.path)
@@ -101,12 +101,29 @@ export const ripgrepLayer = Layer.effect(
         }),
       find: (input) =>
         Effect.gen(function* () {
+          // The initial scan runs in the background. Search directly until it
+          // produces entries, so the first request can find a new project file.
+          const files = state.files.length
+            ? state.files
+            : (yield* ripgrep
+                .find({ cwd: location.directory, pattern: "*", limit: 100_000 })
+                .pipe(Effect.orDie)).map((entry) => entry.path)
+          const foundDirectories = new Set<string>()
+          if (!state.directories.length && input.type !== "file") {
+            for (const file of files) {
+              const parts = file.split("/")
+              parts
+                .slice(0, -1)
+                .forEach((_, index) => foundDirectories.add(parts.slice(0, index + 1).join("/") + path.sep))
+            }
+          }
+          const directoryItems = state.directories.length ? state.directories : Array.from(foundDirectories)
           const items =
             input.type === "file"
-              ? state.files
+              ? files
               : input.type === "directory"
-                ? state.directories
-                : [...state.files, ...state.directories]
+                ? directoryItems
+                : [...files, ...directoryItems]
           return fuzzysort.go(input.query, items, { limit: input.limit ?? 50 }).map((item) => {
             const relative = item.target
             const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
