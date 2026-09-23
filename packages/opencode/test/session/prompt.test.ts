@@ -221,13 +221,20 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
   return LayerNode.compile(promptRoot, replacements)
 }
 
-function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
+function makeHttp(input?: {
+  mcpInstructions?: MCP.ServerInstructions[]
+  processor?: "blocking"
+  flags?: Parameters<typeof RuntimeFlags.layer>[0]
+}) {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
   const replacements = [
     [SessionSummary.node, summary],
     [LSP.node, lsp],
     [MCP.node, makeMcp(input?.mcpInstructions)],
-    [RuntimeFlags.node, runtimeFlags],
+    [
+      RuntimeFlags.node,
+      input?.flags ? RuntimeFlags.layer({ experimentalEventSystem: true, ...input.flags }) : runtimeFlags,
+    ],
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -253,6 +260,7 @@ const withMcpInstructions = testEffect(
     ],
   }),
 )
+const backgroundSubagents = testEffect(makeHttp({ flags: { experimentalBackgroundSubagents: true } }))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
 
@@ -2871,4 +2879,83 @@ it.instance("subtask message records the session variant only when it runs the s
     expect(wrapper?.info.role === "assistant" && wrapper.info.modelID).toBe(ModelV2.ID.make("test-small"))
     expect(wrapper?.info.role === "assistant" && wrapper.info.variant).toBeUndefined()
   }),
+)
+
+// Three levels: the session fans out to `helper`, which starts a nested task in the background and
+// then ends its turn. This is what `task({ background: true })` is for, and it needs
+// `experimental.background_subagents`, a subagent permitted to spawn one, and `subagent_depth: 2`.
+function fanOutCfg(url: string) {
+  return {
+    ...providerCfg(url),
+    subagent_depth: 2,
+    agent: {
+      build: { prompt: "MARKER-BUILD" },
+      helper: { mode: "subagent" as const, prompt: "MARKER-HELPER", permission: { task: "allow" as const } },
+      general: { prompt: "MARKER-GENERAL" },
+    },
+  }
+}
+
+const serving = (marker: string) => (hit: { body: Record<string, unknown> }) =>
+  JSON.stringify(hit.body).includes(marker)
+
+backgroundSubagents.instance(
+  "fan-out reports a subtask completed while work that subtask started is still running",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(fanOutCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const background = yield* BackgroundJob.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      // Each level is answered by its own system prompt, so a level's turn cannot be served with
+      // another's reply just because the text appears in its history as tool arguments.
+      yield* llm.toolMatch(serving("MARKER-BUILD"), "task-parallel", {
+        tasks: [{ description: "nested", prompt: "start background work", subagent_type: "helper" }],
+      })
+      yield* llm.toolMatch(serving("MARKER-HELPER"), "task", {
+        description: "grandchild",
+        prompt: "long running work",
+        subagent_type: "general",
+        background: true,
+      })
+      // The grandchild never answers: it is the work that is still running.
+      yield* llm.pushMatch(serving("MARKER-GENERAL"), reply().hang().item())
+      yield* llm.textMatch(serving("MARKER-HELPER"), "child done")
+      yield* llm.textMatch(serving("MARKER-BUILD"), "parent done")
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "fan out please" }],
+      })
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      const summary = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .findLast((part) => part.type === "tool" && part.tool === "task-parallel")
+      const jobs = yield* background.list()
+      const nested = jobs.find((job) => job.type === "task")
+
+      // This records what the fan-out does today, not what it should do. The subtask is reported as
+      // COMPLETED and the caller is handed the child's last words, while the task that child started
+      // is still running — and its result, when it arrives, is injected into the child's session,
+      // which nobody reads once the fan-out has answered. Upstream is fixing the same shape for its
+      // own runner in anomalyco/opencode#49305 by running a subagent to quiescence before reading
+      // its answer. Whoever closes this here should expect these assertions to change.
+      expect(result.info.role === "assistant" && result.info.finish).toBe("stop")
+      expect(summary?.type === "tool" && summary.state.status === "completed" && summary.state.output).toContain(
+        "nested: COMPLETED",
+      )
+      expect(nested?.status).toBe("running")
+      expect(jobs.find((job) => job.type === "task-parallel")?.status).toBe("completed")
+
+      if (nested) yield* background.cancel(nested.id)
+    }),
+  30_000,
 )
