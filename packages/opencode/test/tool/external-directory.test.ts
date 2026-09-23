@@ -116,8 +116,8 @@ describe("tool.assertExternalDirectory", () => {
           yield* Effect.promise(() => Bun.write(path.join(outerTmp, "outside.txt"), "x"))
 
           const target = path.join(outerTmp, "outside.txt")
+          // Keep the drive: root-relative paths use the runner's current drive.
           const alt = target
-            .replace(/^[A-Za-z]:/, "")
             .replaceAll("\\", "/")
             .toLowerCase()
 

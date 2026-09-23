@@ -192,8 +192,8 @@ describe("tool.read external_directory permission", () => {
 
         const { items, next } = asks()
         const target = path.join(dir, "test.txt")
+        // Keep the drive: root-relative paths use the runner's current drive.
         const alt = target
-          .replace(/^[A-Za-z]:/, "")
           .replaceAll("\\", "/")
           .toLowerCase()
 
