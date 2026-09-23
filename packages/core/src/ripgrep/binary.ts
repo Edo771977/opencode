@@ -89,8 +89,9 @@ export namespace RipgrepBinary {
       }, Effect.scoped)
 
       return Service.of({
-        filepath: yield* Effect.cached(
-          Effect.gen(function* () {
+        // A location's background scan can be interrupted during the first
+        // install. Resolve per call so an interrupted attempt can be retried.
+        filepath: Effect.gen(function* () {
             const system = yield* Effect.sync(() => which(process.platform === "win32" ? "rg.exe" : "rg"))
             if (system && (yield* fs.isFile(system).pipe(Effect.orDie))) return system
 
@@ -129,8 +130,7 @@ export namespace RipgrepBinary {
                 return target
               }),
             )
-          }),
-        ),
+        }),
       })
     }),
   )
