@@ -71,7 +71,7 @@ jobs:
           bun -e 'import { Effect } from "effect"; import { RipgrepBinary } from "./src/ripgrep/binary"; import { LayerNode } from "./src/effect/layer-node"; await Effect.runPromise(Effect.flatMap(RipgrepBinary.Service, (binary) => binary.filepath).pipe(Effect.provide(LayerNode.compile(RipgrepBinary.node))))'
 
       - name: Run unit tests
-        timeout-minutes: 20
+        timeout-minutes: ${{ runner.os == 'Windows' && 50 || 20 }}
         run: GITHUB_ACTIONS=false bun turbo test --concurrency=2
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
