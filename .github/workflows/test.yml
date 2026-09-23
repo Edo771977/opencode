@@ -63,6 +63,13 @@ jobs:
             turbo-${{ runner.os }}-${{ hashFiles('turbo.json', '**/package.json') }}-
             turbo-${{ runner.os }}-
 
+      # Avoid concurrent first-use Expand-Archive calls in core tests.
+      - name: Warm ripgrep on Windows
+        if: runner.os == 'Windows'
+        working-directory: packages/core
+        run: |
+          bun -e 'import { Effect } from "effect"; import { RipgrepBinary } from "./src/ripgrep/binary"; await Effect.runPromise(Effect.flatMap(RipgrepBinary.Service, (binary) => binary.filepath).pipe(Effect.provide(RipgrepBinary.node)))'
+
       - name: Run unit tests
         timeout-minutes: 20
         run: GITHUB_ACTIONS=false bun turbo test --concurrency=2
