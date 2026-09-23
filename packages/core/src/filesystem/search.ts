@@ -101,7 +101,6 @@ export const ripgrepLayer = Layer.effect(
         }),
       find: (input) =>
         Effect.gen(function* () {
-          console.error("search find start", location.directory, state.files.length)
           // The initial scan runs in the background. Search directly until it
           // produces entries, so the first request can find a new project file.
           const files = state.files.length
@@ -112,7 +111,6 @@ export const ripgrepLayer = Layer.effect(
                 ),
                 Effect.orDie,
               )).map((entry) => entry.path)
-          console.error("search find files", files.length)
           const foundDirectories = new Set<string>()
           if (!state.directories.length && input.type !== "file") {
             for (const file of files) {

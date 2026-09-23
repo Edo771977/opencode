@@ -5,7 +5,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
-import { Cause, Effect, Exit, Layer, Option } from "effect"
+import { Effect, Layer, Option } from "effect"
 import ignore from "ignore"
 import path from "path"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -130,15 +130,7 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
 
     return handlers
       .handle("findText", findText)
-      .handle("findFile", (ctx) =>
-        findFile(ctx).pipe(
-          Effect.tapExit((exit) =>
-            Effect.sync(() =>
-              console.error("findFile exit", Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "ok"),
-            ),
-          ),
-        ),
-      )
+      .handle("findFile", findFile)
       .handle("findSymbol", findSymbol)
       .handle("list", list)
       .handle("content", content)

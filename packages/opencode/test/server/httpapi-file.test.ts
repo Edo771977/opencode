@@ -65,10 +65,13 @@ describe("file HttpApi", () => {
         Effect.promise(async () => {
           const response = await request(FilePaths.findFile, tmp.path, { query: "hello", type: "file" })
           const raw = await response.text()
-          let body: string[]
+          let body: unknown
           try {
             body = JSON.parse(raw)
           } catch {
+            throw new Error(`findFile returned HTTP ${response.status}: ${raw.slice(0, 500)}`)
+          }
+          if (!Array.isArray(body) || !body.every((item) => typeof item === "string")) {
             throw new Error(`findFile returned HTTP ${response.status}: ${raw.slice(0, 500)}`)
           }
           return body.includes("hello.txt") ? { response, body } : undefined
