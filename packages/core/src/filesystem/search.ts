@@ -105,9 +105,12 @@ export const ripgrepLayer = Layer.effect(
           // produces entries, so the first request can find a new project file.
           const files = state.files.length
             ? state.files
-            : (yield* ripgrep
-                .find({ cwd: location.directory, pattern: "*", limit: 100_000 })
-                .pipe(Effect.orDie)).map((entry) => entry.path)
+            : (yield* ripgrep.find({ cwd: location.directory, pattern: "*", limit: 100_000 }).pipe(
+                Effect.tapError((error) =>
+                  Effect.logWarning("file search fallback failed", { error, directory: location.directory }),
+                ),
+                Effect.orDie,
+              )).map((entry) => entry.path)
           const foundDirectories = new Set<string>()
           if (!state.directories.length && input.type !== "file") {
             for (const file of files) {

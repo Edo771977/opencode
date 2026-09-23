@@ -38,3 +38,13 @@ jobs:
         working-directory: packages/core
         run: |
           bun test test/catalog.test.ts test/config/agent.test.ts test/config/config.test.ts test/model.test.ts test/session-runner-model.test.ts test/session-runner.test.ts
+
+  windows-file-search:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-bun
+      - name: Test Windows file search
+        working-directory: packages/opencode
+        run: bun test --timeout 30000 test/server/httpapi-file.test.ts

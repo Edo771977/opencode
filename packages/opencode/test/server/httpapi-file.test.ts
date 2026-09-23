@@ -64,7 +64,13 @@ describe("file HttpApi", () => {
       pollWithTimeout(
         Effect.promise(async () => {
           const response = await request(FilePaths.findFile, tmp.path, { query: "hello", type: "file" })
-          const body = await response.json()
+          const raw = await response.text()
+          let body: string[]
+          try {
+            body = JSON.parse(raw)
+          } catch {
+            throw new Error(`findFile returned HTTP ${response.status}: ${raw.slice(0, 500)}`)
+          }
           return body.includes("hello.txt") ? { response, body } : undefined
         }),
         "file search index was not ready",
