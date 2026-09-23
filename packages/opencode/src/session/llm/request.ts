@@ -85,7 +85,12 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const chosenFor =
     input.model.id === input.user.model.modelID && input.model.providerID === input.user.model.providerID
   const requested = chosenFor ? input.user.model.variant : input.variant
-  const variant = !input.small && requested && input.model.variants ? input.model.variants[requested] : {}
+  // `hasOwn`, because a name like `constructor` resolves on any object and would merge a function
+  // into the request options.
+  const variant =
+    !input.small && requested && input.model.variants && Object.hasOwn(input.model.variants, requested)
+      ? input.model.variants[requested]
+      : {}
   const base = input.small
     ? ProviderTransform.smallOptions(input.model)
     : ProviderTransform.options({

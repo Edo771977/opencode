@@ -250,11 +250,21 @@ export const locationLayer = Layer.effect(
       // the invariant: never send a turn to another provider on an unauthenticated route.
       if (small.providerID !== selected.providerID && !connection) return undefined
       const credential = connection ? yield* integrations.connection.resolve(connection) : undefined
-      // Never inherit a variant, always honor a written one: the session's variant is meaningless on
-      // a different model, while a variant written into `small_model` names that exact pair. Passing
-      // undefined still applies the small model's own default variant, which calling
-      // `fromCatalogModel` directly used to skip.
-      return yield* withVariant(small, chosen.variant).pipe(
+      // Never inherit a variant, and honor a written one where the model has it: the session's
+      // variant is meaningless on a different model, while a variant written into `small_model`
+      // names that exact pair. Passing undefined still applies the small model's own default
+      // variant, which calling `fromCatalogModel` directly used to skip.
+      //
+      // A variant the model does not offer is a mistake in one word of the reference, and refusing
+      // the small model over it would quietly stop an agent degrading and leave it paying full
+      // price for the rest of the session. The model is used without it, said once.
+      const variant = chosen.variant && small.variants.some((item) => item.id === chosen.variant)
+      if (chosen.variant && !variant)
+        yield* warnOnce(
+          `variant:${small.providerID}/${small.id}#${chosen.variant}`,
+          `Small model ${small.providerID}/${small.id} does not offer the variant "${chosen.variant}"; using it without one`,
+        )
+      return yield* withVariant(small, variant ? chosen.variant : undefined).pipe(
         Effect.flatMap((model) => fromCatalogModel(model, credential)),
       )
     })

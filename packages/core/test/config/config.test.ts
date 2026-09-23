@@ -507,6 +507,39 @@ describe("Config", () => {
     ),
   )
 
+  it.live("keeps the rest of a legacy file when one of its keys is written wrongly", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `skills` here is neither shape — a plain typo. It used to take the file with it, while
+          // the same typo in a key only V2 has cost only that key.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                agent: { build: { prompt: "legacy" } },
+                skills: 5,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.skills).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
   it.live("reads a shared key written in the current shape next to a legacy one", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

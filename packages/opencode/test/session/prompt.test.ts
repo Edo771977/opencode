@@ -2824,3 +2824,29 @@ it.instance("loop ignores a small_model variant the small model does not offer",
     expect(result.info.role === "assistant" && result.info.variant).toBeUndefined()
   }),
 )
+
+it.instance("loop ignores a small_model variant that is only an inherited property name", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5 }, "test/test-small#constructor"))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    // `constructor` resolves on every object: a name is a variant only if the model declares it.
+    expect(hits[0]?.body.model).toBe("test-small")
+    expect(result.info.role === "assistant" && result.info.variant).toBeUndefined()
+  }),
+)

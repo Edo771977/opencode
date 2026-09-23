@@ -274,7 +274,12 @@ const layer = Layer.effect(
         sessionID,
         mode: task.agent,
         agent: task.agent,
-        variant: lastUser.model.variant,
+        // Attributed to the task's model, which may not be the session's: a variant chosen for one
+        // model is not a setting of the other, and this message must not claim it.
+        variant:
+          taskModel.id === lastUser.model.modelID && taskModel.providerID === lastUser.model.providerID
+            ? lastUser.model.variant
+            : undefined,
         path: { cwd: ctx.directory, root: ctx.worktree },
         cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -1203,9 +1208,10 @@ const layer = Layer.effect(
             configuredSmall?.providerID === small.providerID &&
             configuredSmall.modelID === small.id &&
             configuredSmall.variant &&
-            // Only a variant the model actually offers. Recording a name it does not have would
-            // leave the message claiming a setting the request never carried.
-            small.variants?.[configuredSmall.variant]
+            // Only a variant the model actually offers, and only one of its own: `constructor` and
+            // `toString` are on every object, and recording a name the request never carried is
+            // the disagreement this rule exists to prevent.
+            Object.hasOwn(small.variants ?? {}, configuredSmall.variant)
               ? configuredSmall.variant
               : undefined
           const isLastStep = step >= maxSteps || budget.stop

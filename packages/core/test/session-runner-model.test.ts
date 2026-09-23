@@ -509,7 +509,7 @@ describe("SessionRunnerModel.resolveSmall", () => {
     }),
   )
 
-  smallIt.effect("declines a small_model naming a variant the model does not offer", () =>
+  smallIt.effect("uses a small_model without a variant it does not offer", () =>
     Effect.gen(function* () {
       configuredSmall = `${providerID}/chosen-haiku#nope`
       yield* seed([
@@ -517,8 +517,11 @@ describe("SessionRunnerModel.resolveSmall", () => {
         { id: "chosen-haiku", tools: true, cost: 5, variants: [{ id: "fast", body: {} }] },
       ])
 
+      // One wrong word in the reference is not a reason to send the turn back to the expensive
+      // model: that would quietly stop an agent degrading for the rest of the session. The v1 loop
+      // reads the same setting the same way.
       const models = yield* SessionRunnerModel.Service
-      expect(yield* models.resolveSmall(session)).toBeUndefined()
+      expect(yield* models.resolveSmall(session)).toMatchObject({ id: "chosen-haiku" })
     }),
   )
 
