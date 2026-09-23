@@ -2027,19 +2027,34 @@ unixNoLLMServer(
       Effect.gen(function* () {
         const { prompt, chat } = yield* boot()
 
+        const { directory } = yield* TestInstance
+        const release = path.join(directory, ".shell-release")
         const a = yield* prompt
-          .shell({ sessionID: chat.id, agent: "build", command: "sleep 5" })
+          .shell({
+            sessionID: chat.id,
+            agent: "build",
+            command: "while [ ! -f '.shell-release' ]; do sleep 0.1; done",
+          })
           .pipe(Effect.forkChild)
-        yield* waitForBusy(chat.id)
+        yield* Effect.gen(function* () {
+          yield* waitForBusy(chat.id)
 
-        const exit = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "echo hi" }).pipe(Effect.exit)
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit)) {
-          expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
-        }
-
-        yield* prompt.cancel(chat.id)
-        yield* Fiber.await(a)
+          const exit = yield* prompt
+            .shell({ sessionID: chat.id, agent: "build", command: "echo hi" })
+            .pipe(Effect.timeout("5 seconds"), Effect.exit)
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isFailure(exit)) {
+            expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
+          }
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              yield* Effect.promise(() => Bun.write(release, "done"))
+              yield* prompt.cancel(chat.id).pipe(Effect.ignore)
+              yield* Fiber.await(a).pipe(Effect.ignore)
+            }),
+          ),
+        )
       }),
     ),
   { git: true, config: cfg },
