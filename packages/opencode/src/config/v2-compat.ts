@@ -62,6 +62,7 @@ const Selection = Schema.Union([
 ])
 const Agent = Schema.Struct({
   model: Schema.optional(Selection),
+  small: Schema.optional(Schema.Boolean),
   request: Schema.optional(
     Schema.Struct({
       headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
@@ -74,6 +75,8 @@ const Agent = Schema.Struct({
   hidden: Schema.optional(Schema.Boolean),
   color: Schema.optional(Schema.String.check(Schema.isPattern(/^#[0-9a-fA-F]{6}$/))),
   steps: Schema.optional(PositiveInt),
+  budget: Schema.optional(Schema.Finite),
+  budget_stop: Schema.optional(Schema.Finite),
   disabled: Schema.optional(Schema.Boolean),
 })
 const Command = Schema.Struct({
@@ -200,8 +203,14 @@ function normalizeExperimental(
     ["experimental", "subagent_depth"],
     diagnostics,
   )
-  if (depth !== undefined)
-    preferLegacy(result, "subagent_depth", depth, ["experimental", "subagent_depth"], diagnostics)
+  if (depth === undefined) return
+  preferLegacy(result, "subagent_depth", depth, ["experimental", "subagent_depth"], diagnostics)
+  // Lowering moves the setting to the key the V1 runtime reads. Leaving the nested spelling behind
+  // as well would hand the runtime the same setting twice, under a key it never looks at.
+  const remaining = decodeRecord(result.experimental)
+  if (Option.isNone(remaining)) return
+  const { subagent_depth: _lowered, ...rest } = remaining.value
+  result.experimental = rest
 }
 
 function normalizeAgents(input: Record<string, unknown>, result: Record<string, unknown>, diagnostics: Diagnostic[]) {
@@ -395,7 +404,7 @@ function lowerServer(input: Schema.Schema.Type<typeof Server>) {
 
 function lowerAgent(input: Schema.Schema.Type<typeof Agent>) {
   const result: Record<string, unknown> = {}
-  for (const key of ["description", "mode", "hidden", "color", "steps"] as const) {
+  for (const key of ["description", "mode", "hidden", "color", "steps", "small", "budget", "budget_stop"] as const) {
     if (input[key] !== undefined) result[key] = input[key]
   }
   if (input.system !== undefined) result.prompt = input.system

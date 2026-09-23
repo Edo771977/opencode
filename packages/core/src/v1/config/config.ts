@@ -182,6 +182,9 @@ export const Info = Schema.Struct({
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
       }),
+      subagent_depth: Schema.optional(NonNegativeInt).annotate({
+        description: "How deep subagents may spawn further subagents. The top-level key of the same name wins",
+      }),
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),

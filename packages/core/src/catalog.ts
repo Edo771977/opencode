@@ -243,7 +243,8 @@ const layer = Layer.effect(
 
           if (providerID === ProviderV2.ID.opencode) {
             const gpt5Nano = record.models.get(ModelV2.ID.make("gpt-5-nano"))
-            if (gpt5Nano?.enabled && gpt5Nano.status === "active") return projectModel(gpt5Nano, provider)
+            if (gpt5Nano?.enabled && gpt5Nano.status === "active" && gpt5Nano.capabilities.tools)
+              return projectModel(gpt5Nano, provider)
           }
 
           const candidates = pipe(
@@ -253,6 +254,9 @@ const layer = Layer.effect(
                 model.providerID === providerID &&
                 model.enabled &&
                 model.status === "active" &&
+                // An agent's turn carries tool definitions, so a model that cannot call tools is not a
+                // substitute for it however cheap it is.
+                model.capabilities.tools &&
                 model.capabilities.input.some((item) => item.startsWith("text")) &&
                 model.capabilities.output.some((item) => item.startsWith("text")),
             ),

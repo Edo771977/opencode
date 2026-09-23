@@ -12,6 +12,10 @@ const Color = Schema.Union([
 const AgentSchema = Schema.StructWithRest(
   Schema.Struct({
     model: Schema.optional(Schema.String),
+    small: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Run this agent on the provider's cheaper small model instead of the model the session would otherwise use",
+    }),
     variant: Schema.optional(Schema.String).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
@@ -34,6 +38,14 @@ const AgentSchema = Schema.StructWithRest(
     steps: Schema.optional(PositiveInt).annotate({
       description: "Maximum number of agentic iterations before forcing text-only response",
     }),
+    budget: Schema.optional(Schema.Finite.check(Schema.isGreaterThan(0))).annotate({
+      description:
+        "US dollars this agent may spend in a session before its remaining turns run on the cheaper small model. It does not stop the agent",
+    }),
+    budget_stop: Schema.optional(Schema.Finite.check(Schema.isGreaterThan(0))).annotate({
+      description:
+        "US dollars after which this agent stops with a text-only summary. Off by default; suited to subagents, whose caller can react to a partial result",
+    }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
     permission: Schema.optional(ConfigPermissionV1.Info),
   }),
@@ -43,6 +55,7 @@ const AgentSchema = Schema.StructWithRest(
 const KNOWN_KEYS = new Set([
   "name",
   "model",
+  "small",
   "variant",
   "prompt",
   "description",
@@ -53,6 +66,8 @@ const KNOWN_KEYS = new Set([
   "color",
   "steps",
   "maxSteps",
+  "budget",
+  "budget_stop",
   "options",
   "permission",
   "disable",

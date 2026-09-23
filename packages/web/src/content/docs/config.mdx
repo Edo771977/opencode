@@ -372,7 +372,7 @@ You can configure the providers and models you want to use in your OpenCode conf
 }
 ```
 
-The `small_model` option configures a separate model for lightweight tasks like title generation. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model.
+The `small_model` option configures a separate model for lightweight tasks like title generation, for any agent that sets [`small`](/docs/agents#small-model), and for an agent that has reached its [`budget`](/docs/agents#budget). It may name a variant, as `model` does, which applies to the agent turns it serves; the one-off calls opencode makes for itself, such as title generation, run the model on its own settings. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model. For an agent turn the model must also be able to call tools; one that cannot is skipped, and the agent runs on the session model.
 
 Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `setCacheKey`:
 
@@ -557,6 +557,8 @@ You can control how deeply subagents can invoke other subagents using the `subag
 ```
 
 The default is `1`, which allows primary agents to launch subagents but prevents those subagents from launching additional subagents. Set it to `2` to allow one additional level of nested subagents, or `0` to prevent all subagent launches.
+
+It can also be written as `experimental.subagent_depth`. Both spellings mean the same thing; the top-level one wins if a file sets both.
 
 ---
 

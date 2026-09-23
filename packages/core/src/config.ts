@@ -36,6 +36,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   model: Schema.String.pipe(Schema.optional).annotate({
     description: "Default model to use when no session or agent model is selected",
   }),
+  small_model: Schema.String.pipe(Schema.optional).annotate({
+    description:
+      "Model to use for agents that opt into `small`. Falls back to the cheapest recent small model of the session provider",
+  }),
   default_agent: Schema.String.pipe(Schema.optional).annotate({
     description: "Default primary agent to use when no session agent is selected",
   }),
@@ -150,14 +154,88 @@ const layer = Layer.effect(
 
       const errors: ParseError[] = []
       const input: unknown = parse(text, errors, { allowTrailingComma: true })
-      if (errors.length) return
+      if (errors.length) {
+        yield* Effect.logError(`Ignoring ${filepath}: it is not valid JSON`)
+        return
+      }
 
-      const info = Option.getOrUndefined(
-        ConfigMigrateV1.isV1(input)
-          ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
-          : decodeInfo(input),
-      )
-      if (!info) return
+      // A file half-way through the migration carries both spellings, and one legacy key is enough
+      // to send the whole file through the V1 reading, which has nowhere to put the keys only V2
+      // has — and rejects outright the shared keys written in their V2 shape. Reading the two
+      // halves apart and laying the authored one back on top is what loses neither.
+      const mixed = ConfigMigrateV1.mixed(input)
+      if (mixed)
+        yield* Effect.logWarning(
+          `${filepath} mixes legacy (${mixed.legacy.join(", ")}) and current (${mixed.current.join(", ")}) configuration keys; where both set the same thing the current one wins`,
+        )
+
+      // A file reads as a whole in the ordinary case, and group by group when it does not: a
+      // setting written wrongly costs itself rather than taking every other setting in the file
+      // down with it. Groups, not keys, because the migration folds some keys into one setting and
+      // keeping half of such a pair would mean something the file does not say.
+      const salvage = <A>(source: Record<string, unknown>, decode: (value: unknown) => Option.Option<A>) => {
+        const whole = decode(source)
+        if (Option.isSome(whole)) return { value: Option.getOrUndefined(whole), dropped: [] as string[] }
+        const present = Object.keys(source)
+        return ConfigMigrateV1.groups(present).reduce(
+          (state, group) => {
+            const raw = { ...state.raw, ...Object.fromEntries(group.map((key) => [key, source[key]])) }
+            const decoded = decode(raw)
+            return Option.isSome(decoded)
+              ? { raw, value: Option.getOrUndefined(decoded), dropped: state.dropped }
+              : { raw: state.raw, value: state.value, dropped: [...state.dropped, ...group] }
+          },
+          {
+            raw: {} as Record<string, unknown>,
+            // Nothing readable left is a file that does not decode, not an empty one: an empty
+            // decode succeeds for every schema here, and would turn the file into a document that
+            // says nothing instead of one that is skipped.
+            value: present.length ? undefined : Option.getOrUndefined(decode({})),
+            dropped: [] as string[],
+          },
+        )
+      }
+      const report = (dropped: readonly string[]) =>
+        dropped.length
+          ? Effect.logError(`Ignoring ${dropped.join(", ")} in ${filepath}: they do not match the configuration schema`)
+          : Effect.void
+
+      const info = yield* Effect.gen(function* () {
+        if (!ConfigMigrateV1.isV1(input)) {
+          const current = salvage(input as Record<string, unknown>, decodeInfo)
+          yield* report(current.dropped)
+          return current.value
+        }
+        const legacy = salvage(mixed ? mixed.base : (input as Record<string, unknown>), decodeV1Info)
+        yield* report(legacy.dropped)
+        const migrated = legacy.value && ConfigMigrateV1.migrate(legacy.value)
+        if (!migrated) return undefined
+        if (!mixed) return Option.getOrUndefined(decodeInfo(migrated))
+        const both = Option.getOrUndefined(
+          decodeInfo({ ...migrated, ...ConfigMigrateV1.overlay(migrated, mixed.authored) }),
+        )
+        if (both) return both
+        // Something in the authored half does not decode. Lay its keys on one at a time so a key
+        // that cannot be read costs its own setting and not the ones written beside it, and so the
+        // error names the keys actually dropped.
+        const applied = mixed.current.reduce(
+          (state, key) => {
+            const next = { ...state.value, ...ConfigMigrateV1.overlay(state.value, { [key]: mixed.authored[key] }) }
+            return Option.isSome(decodeInfo(next))
+              ? { value: next, dropped: state.dropped }
+              : { value: state.value, dropped: [...state.dropped, key] }
+          },
+          { value: migrated as Record<string, unknown>, dropped: [] as string[] },
+        )
+        yield* report(applied.dropped)
+        return Option.getOrUndefined(decodeInfo(applied.value))
+      })
+      // A file that does not decode is skipped whole — every setting in it, not just the offending
+      // one — so say which file it was rather than running as if it did not exist.
+      if (!info) {
+        yield* Effect.logError(`Ignoring ${filepath}: it does not match the configuration schema`)
+        return
+      }
       return new Document({ type: "document", path: filepath, info })
     })
 

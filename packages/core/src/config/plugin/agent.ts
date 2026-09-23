@@ -31,6 +31,7 @@ type PathAction =
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
 const agentKeys = new Set([
   "model",
+  "small",
   "variant",
   "request",
   "system",
@@ -92,6 +93,7 @@ export const Plugin = define({
                 const model = ModelV2.parse(item.model)
                 agent.model = { id: model.modelID, providerID: model.providerID, variant: agent.model?.variant }
               }
+              if (item.small !== undefined) agent.small = item.small
               if (item.variant !== undefined && agent.model !== undefined) {
                 agent.model.variant = ModelV2.VariantID.make(item.variant)
               }

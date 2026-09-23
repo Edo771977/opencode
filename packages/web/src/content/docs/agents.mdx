@@ -314,6 +314,41 @@ The legacy `maxSteps` field is deprecated. Use `steps` instead.
 
 ---
 
+### Budget
+
+Use `budget` to cap what an agent spends, in US dollars, within a session. It does not stop the agent: once the threshold is reached, the remaining turns run on the [small model](#small-model) and the agent is told once that it is working on what is left of its budget.
+
+```json title="opencode.json"
+{
+  "agent": {
+    "build": {
+      "budget": 5
+    },
+    "researcher": {
+      "mode": "subagent",
+      "budget": 0.5,
+      "budget_stop": 2
+    }
+  }
+}
+```
+
+That is the deliberate default: a run meant to carry a piece of work to the end should not depend on someone noticing that it halted. A budget makes an agent cheaper, not absent.
+
+`budget_stop` is the ceiling, and it does stop: the agent gets one text-only turn to summarize what it did and what is left. It is off unless you set it. It suits a subagent, whose caller reads the partial result and decides what to do next — retry it differently, split the work, or do it itself. On a primary agent it ends the run and waits for you, so set it only if that is what you want.
+
+Both are counted per agent per session, so switching agents mid-session gives each its own budget, and a subagent's session carries only its own work. An agent with no `budget` is never degraded.
+
+Set `budget_stop` above `budget` if you want both to happen. They are independent thresholds, so a ceiling at or below the budget stops the agent at a point it would never have reached cheaply — which is a reasonable thing to ask for, but not usually what someone who set both had in mind.
+
+The ceiling's own turn runs on the agent's normal model: it has to say what was done and what is left, which is the wrong place to save a few cents. An agent with [`small`](#small-model) is on the cheap model for that turn too, because it is on the cheap model for every turn.
+
+:::note
+Spend is measured from the usage each provider reports. A local model that reports no cost never reaches a budget. Degrading picks the same model as [`small`](#small-model), so the caveats there apply: with no cheaper model available the agent keeps working on the session model, and a `small_model` from another provider sends the rest of the session to that provider.
+:::
+
+---
+
 ### Disable
 
 Set to `true` to disable the agent.
@@ -367,6 +402,42 @@ If you don’t specify a model, primary agents use the [model globally configure
 ```
 
 The model ID in your OpenCode config uses the format `provider/model-id`. For example, if you're using [OpenCode Zen](/docs/zen), you would use `opencode/gpt-5.1-codex` for GPT 5.1 Codex.
+
+---
+
+### Small model
+
+Set `small` to run this agent on a cheaper, faster model without naming one per agent. Useful for agents whose work is routine enough that the main model is not worth its cost.
+
+```json title="opencode.json"
+{
+  "agent": {
+    "triage": {
+      "description": "Sorts incoming issues",
+      "mode": "subagent",
+      "small": true
+    }
+  }
+}
+```
+
+The model is picked in this order:
+
+1. The [`small_model`](/docs/config#models) option, if you set one and it is in your catalog. It takes the same `provider/model` form as [`model`](#model), and may name a variant: `anthropic/claude-haiku-4-5#fast`.
+2. Otherwise a cheaper model of the session's own provider, when one is known for it.
+3. Otherwise the session model, unchanged.
+
+A few things to know:
+
+- `small` applies to every turn the agent takes, not only to short ones. Use the [`model`](#model) option instead when you want a specific model.
+- It outranks the agent's own [`model`](#model): asking for the small model is asking for the cheap one, whichever model the agent would otherwise have used.
+- A model that cannot call tools is never selected, because an agent's turn carries tool definitions.
+- A small model that resolves to the session's own model changes nothing, and is treated as if none were available.
+- `small_model` may name a model from another provider than the session's. Nothing else does that on its own, so keep it in mind if a project-level config sets it.
+- The session's variant is never carried over; a variant written into `small_model` is, when that model offers it. A variant is chosen for one model, and the same name on another is a different setting or none at all — so the turn is sent with the variant written next to the model it moved to, and otherwise with that model's own default.
+- A value that is not a `provider/model` reference, or that names a model you do not have, is ignored rather than silently reshaping the request.
+- A missing small model never fails a turn: if none is available, or its provider is not authorized, the agent runs on the session model.
+- The model that actually answered is the one recorded in the session, so usage and cost are attributed to it.
 
 ---
 
@@ -600,7 +671,7 @@ Only applies to `mode: subagent` agents.
 
 ### Task permissions
 
-Control which subagents an agent can invoke via the Task tool with `permission.task`. Uses glob patterns for flexible matching.
+Control which subagents an agent can invoke via the Task tool with `permission.task`. Uses glob patterns for flexible matching. The same rules govern the parallel fan-out tool, `task-parallel`, which runs up to five independent subtasks at once in their own subagent sessions.
 
 ```json title="opencode.json"
 {
@@ -620,6 +691,30 @@ Control which subagents an agent can invoke via the Task tool with `permission.t
 ```
 
 When set to `deny`, the subagent is removed from the Task tool description entirely, so the model won't attempt to invoke it.
+
+Subagents do not fan out by default: a subagent is denied `task` and `task-parallel` unless its own permissions grant them, and the `subagent_depth` config still caps nesting. Tools you reserve for primary agents through `experimental.primary_tools` are denied to subagents spawned either way.
+
+---
+
+### Subagent results
+
+A subagent answers in prose, and the caller receives its last block of text. That reads well and is hard to act on, so a caller that will use the answer rather than relay it can declare the fields it needs back. The subagent is then told to end with one JSON object carrying exactly those fields, and the task fails if it does not produce them — the caller never has to parse prose or guess at a missing value.
+
+This is set by the calling model on the Task tool, not in your config:
+
+```json
+{
+  "description": "audit dependencies",
+  "prompt": "Check every direct dependency for a known advisory.",
+  "subagent_type": "general",
+  "output": [
+    { "name": "summary", "description": "What was found", "type": "string" },
+    { "name": "advisories", "description": "One entry per affected package", "type": "array" }
+  ]
+}
+```
+
+A field may declare a `type` — `string`, `number`, `boolean`, `array` or `object` — or leave it out to accept any value. When a subagent ignores the shape, the task fails with what was missing and the session stays resumable through its `task_id`, so the caller can say what was wrong instead of starting over. The parallel fan-out takes the same declaration per subtask, which is what lets several results be integrated side by side.
 
 :::tip
 Rules are evaluated in order, and the **last matching rule wins**. In the example above, `orchestrator-planner` matches both `*` (deny) and `orchestrator-*` (allow), but since `orchestrator-*` comes after `*`, the result is `allow`.

@@ -8,6 +8,7 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+import { TaskOutput } from "./task-output"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
 import { Effect, Exit, Schema, Scope } from "effect"
@@ -49,6 +50,10 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  output: Schema.optional(Schema.Array(TaskOutput.Field)).annotate({
+    description:
+      "Fields you need back from the subagent. Set this when you will act on the answer rather than read it: the subagent is told to end with a JSON object carrying exactly these fields, and the task fails if it does not, instead of handing you prose to guess at",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -208,7 +213,9 @@ export const TaskTool = Tool.define(
           },
           variant: next.model ? undefined : variant,
           agent: next.name,
-          parts,
+          parts: params.output?.length
+            ? [...parts, { type: "text" as const, synthetic: true, text: TaskOutput.instruction(params.output) }]
+            : parts,
         })
         if (result.info.role === "assistant" && result.info.error) {
           const message =
@@ -221,7 +228,19 @@ export const TaskTool = Tool.define(
         if (failed?.type === "tool" && failed.state.status === "error") {
           return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
         }
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        if (!params.output?.length) return text
+        // A declared shape the subagent did not meet is a failed task, not a result to pass on: the
+        // caller asked for fields it intends to act on. Failing here leaves the session resumable by
+        // task_id, so the caller can say what was wrong rather than start over.
+        const parsed = TaskOutput.parse(text, params.output)
+        if (!parsed.ok)
+          return yield* Effect.fail(
+            new Error(
+              `Subagent did not return the requested fields (task_id: ${nextSession.id}): ${parsed.error}. It answered: ${TaskOutput.excerpt(text)}`,
+            ),
+          )
+        return JSON.stringify(parsed.value, null, 2)
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (

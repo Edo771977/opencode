@@ -822,6 +822,38 @@ it.instance(
 )
 
 it.instance(
+  "getSmallModel ignores a small_model that is not a model reference",
+  Effect.gen(function* () {
+    yield* set("ANTHROPIC_API_KEY", "test-api-key")
+    // No provider, so there is nothing to look up; reading it as one would search a provider named
+    // after the model, and an empty variant is a reference the user did not finish writing.
+    expect(yield* Provider.use.getSmallModel(ProviderV2.ID.anthropic)).toBeUndefined()
+  }),
+  { config: { small_model: "claude-sonnet-4-6" } },
+)
+
+it.instance(
+  "getSmallModel ignores a small_model with an empty variant",
+  Effect.gen(function* () {
+    yield* set("ANTHROPIC_API_KEY", "test-api-key")
+    expect(yield* Provider.use.getSmallModel(ProviderV2.ID.anthropic)).toBeUndefined()
+  }),
+  { config: { small_model: "anthropic/claude-sonnet-4-6#" } },
+)
+
+it.instance(
+  "getSmallModel resolves a small_model written with a variant",
+  Effect.gen(function* () {
+    yield* set("ANTHROPIC_API_KEY", "test-api-key")
+    const model = yield* Provider.use.getSmallModel(ProviderV2.ID.anthropic)
+    // The variant names a setting of the model, not another model, so it must not be part of the
+    // lookup: not finding it would leave the agent on the expensive model it asked to move off.
+    expect(String(model?.id)).toBe("claude-sonnet-4-6")
+  }),
+  { config: { small_model: "anthropic/claude-sonnet-4-6#thinking" } },
+)
+
+it.instance(
   "getSmallModel ignores invalid config small_model",
   Effect.gen(function* () {
     yield* set("ANTHROPIC_API_KEY", "test-api-key")

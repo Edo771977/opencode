@@ -76,6 +76,182 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("lets the rest of the file settle a key both shapes share", () =>
+    Effect.sync(() => {
+      // `small_model` alone leaves the V1 reading in place, which is what keeps the V1 shapes of
+      // `skills`, `mcp` and `compaction` from being decoded as V2 and silently losing data.
+      expect(ConfigMigrateV1.isV1({ small_model: "anthropic/claude-haiku-4-5" })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", skills: { paths: ["./s"] } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", agent: {} })).toBe(true)
+      // A V2-only key settles it the other way, so a V2 file using it keeps its V2 keys.
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", agents: {} })).toBe(false)
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", permissions: [] })).toBe(false)
+    }),
+  )
+
+  it.effect("classifies keys both shapes share by their shape", () =>
+    Effect.sync(() => {
+      // Read as V2 these lose their contents; `skills` fails the decode outright, which discards the
+      // whole file.
+      expect(ConfigMigrateV1.isV1({ model: "a/b", skills: { paths: ["./s"] } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ model: "a/b", mcp: { ctx7: { type: "remote", url: "https://x" } } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { auto: true, preserve_recent_tokens: 20_000 } })).toBe(true)
+      // The V2 shapes of the same keys stay V2.
+      expect(ConfigMigrateV1.isV1({ model: "a/b", skills: ["./s"] })).toBe(false)
+      expect(
+        ConfigMigrateV1.isV1({ mcp: { servers: { ctx7: { type: "remote", url: "https://x" } }, timeout: 5 } }),
+      ).toBe(false)
+      expect(ConfigMigrateV1.isV1({ compaction: { auto: true, keep: { tokens: 20_000 } } })).toBe(false)
+    }),
+  )
+
+  it.effect("keeps v1 shapes when a shared key is the only v1 signal", () =>
+    Effect.sync(() => {
+      const input = {
+        small_model: "anthropic/claude-haiku-4-5",
+        skills: { paths: ["./skill"] },
+        mcp: { ctx7: { type: "remote", url: "https://example.test/mcp" } },
+        compaction: { auto: true, preserve_recent_tokens: 20_000 },
+      }
+      expect(ConfigMigrateV1.isV1(input)).toBe(true)
+
+      const migrated = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)(input, { errors: "all" }))
+      expect(migrated.small_model).toBe("anthropic/claude-haiku-4-5")
+      expect(migrated.skills).toEqual(["./skill"])
+      expect(migrated.mcp).toMatchObject({
+        servers: { ctx7: { type: "remote", url: "https://example.test/mcp" } },
+      })
+      expect(migrated.compaction).toMatchObject({ auto: true, keep: { tokens: 20_000 } })
+    }),
+  )
+
+  it.effect("carries subagent_depth across the migration under either spelling", () =>
+    Effect.sync(() => {
+      // V1 spells it at the top level, V2 under `experimental`. A file that already writes the
+      // nested one is detected as V1 by anything else it contains, so both have to be read here or
+      // the setting has no representation in V2 config at all.
+      const depth = (input: unknown) =>
+        ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)(input, { errors: "all" })).experimental
+          ?.subagent_depth
+
+      expect(depth({ subagent_depth: 3, agent: {} })).toBe(3)
+      expect(depth({ experimental: { subagent_depth: 3 }, agent: {} })).toBe(3)
+      // Both set: the top-level one wins, as the V1 runtime's compatibility layer also decides it.
+      expect(depth({ subagent_depth: 1, experimental: { subagent_depth: 3 }, agent: {} })).toBe(1)
+      expect(depth({ agent: {} })).toBeUndefined()
+
+      const migrated = ConfigMigrateV1.migrate(
+        Schema.decodeUnknownSync(ConfigV1.Info)({ subagent_depth: 3, agent: {} }, { errors: "all" }),
+      )
+      expect(Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" }).experimental?.subagent_depth).toBe(3)
+      expect(ConfigMigrateV1.migrate({}).experimental).toBeUndefined()
+    }),
+  )
+
+  it.effect("carries an agent's model selection and spend limits across the migration", () =>
+    Effect.sync(() => {
+      // The property test below only asserts that a migrated file decodes, so a field the migration
+      // forgets to map is invisible to it: `small`, `budget` and `budget_stop` exist in both agent
+      // schemas, and an agent that loses them here is read by V2 as an agent that never set them.
+      const migrated = ConfigMigrateV1.migrate(
+        Schema.decodeUnknownSync(ConfigV1.Info)(
+          { agent: { build: { small: true, budget: 2, budget_stop: 5, prompt: "p" } } },
+          { errors: "all" },
+        ),
+      )
+      expect(migrated.agents?.["build"]).toMatchObject({ small: true, budget: 2, budget_stop: 5, system: "p" })
+      expect(Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" }).agents?.["build"]).toMatchObject({
+        small: true,
+        budget: 2,
+        budget_stop: 5,
+      })
+    }),
+  )
+
+  it.effect("reports the two spellings a half-migrated file uses", () =>
+    Effect.sync(() => {
+      expect(ConfigMigrateV1.mixed({ agent: {}, agents: {} })).toMatchObject({
+        legacy: ["agent"],
+        current: ["agents"],
+      })
+      // The V1 shape of a shared key counts as a legacy signal, the same way it decides the reading.
+      expect(ConfigMigrateV1.mixed({ skills: { paths: ["./s"] }, agents: {} })?.legacy).toEqual(["skills"])
+      // And its V2 shape counts as a current one: the V1 parser rejects it, and rejecting it takes
+      // the whole file down. `base` is what the V1 parser is given instead.
+      // A V2 servers map may hold a server named `type`: what decides is the value, not the key.
+      expect(
+        ConfigMigrateV1.mixed({ agent: {}, mcp: { servers: { type: { type: "local", command: ["x"] } } } }),
+      ).toMatchObject({ current: ["mcp"] })
+      const shared = ConfigMigrateV1.mixed({ agent: {}, mcp: { servers: {} }, skills: ["./s"] })
+      expect(shared).toMatchObject({ legacy: ["agent"], current: ["mcp", "skills"] })
+      expect(shared?.base).toEqual({ agent: {} })
+      // Only a positively V2 shape. A value the V1 parser reads is not a half-migrated file: saying
+      // it is warns about a migration nobody started, and hands the V2 reader a value it will drop.
+      for (const value of [
+        { compaction: { auto: false } },
+        { mcp: {} },
+        // A V1 server may be named `servers` or `timeout`; the entry itself is what gives it away,
+        // whether it names its `type` or only turns an inherited server off.
+        { mcp: { timeout: { type: "remote", url: "https://example.test/mcp" } } },
+        { mcp: { servers: { type: "remote", url: "https://example.test/mcp" } } },
+        { mcp: { servers: { enabled: false } } },
+      ])
+        expect(ConfigMigrateV1.mixed({ agent: {}, ...value })).toBeUndefined()
+    }),
+  )
+
+  it.effect("lets a shared key written in the current shape rule out the v1 reading", () =>
+    Effect.sync(() => {
+      // `small_model` alone leaves the V1 reading in place, and the V1 parser drops what it cannot
+      // read — here the servers and the compaction budget the file is entirely about.
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", mcp: { servers: { s: { type: "remote", url: "u" } } } })).toBe(
+        false,
+      )
+      expect(ConfigMigrateV1.isV1({ small_model: "a/b", compaction: { keep: { tokens: 5 } } })).toBe(false)
+      // A legacy key still decides it, and the shared key is then taken from the file as authored.
+      expect(ConfigMigrateV1.isV1({ agent: {}, skills: ["./s"] })).toBe(true)
+      // A V1 file may hold nothing but MCP servers, and one of them may be named `servers`.
+      expect(ConfigMigrateV1.isV1({ model: "a/b", mcp: { servers: { type: "local", command: ["x"] } } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ model: "a/b", mcp: { timeout: { enabled: false } } })).toBe(true)
+    }),
+  )
+
+  it.effect("survives a file with an own __proto__ key", () =>
+    Effect.sync(() => {
+      // Looking a key up in the shape tables by name would otherwise find `Object.prototype`.
+      const input = JSON.parse('{"__proto__":{"x":1},"agent":{}}')
+      expect(ConfigMigrateV1.isV1(input)).toBe(true)
+      expect(ConfigMigrateV1.mixed(input)).toBeUndefined()
+      // One shape alone is not a mix, whichever it is.
+      expect(ConfigMigrateV1.mixed({ agent: {} })).toBeUndefined()
+      expect(ConfigMigrateV1.mixed({ agents: {} })).toBeUndefined()
+      expect(ConfigMigrateV1.mixed("not an object")).toBeUndefined()
+    }),
+  )
+
+  it.effect("lays the authored v2 half back over the migrated one", () =>
+    Effect.sync(() => {
+      // Records of named things merge by name, so moving one agent to the new spelling does not
+      // drop the ones still written in the old.
+      expect(
+        ConfigMigrateV1.overlay({ agents: { build: { steps: 4 } } }, { agents: { helper: { description: "x" } } }),
+      ).toEqual({ agents: { build: { steps: 4 }, helper: { description: "x" } } })
+      // The authored value wins field by field, so moving one setting of one agent to the new
+      // spelling does not drop the rest of what that agent still says in the old.
+      expect(
+        ConfigMigrateV1.overlay(
+          { agents: { build: { steps: 4, system: "legacy" } } },
+          { agents: { build: { steps: 9 } } },
+        ),
+      ).toEqual({ agents: { build: { steps: 9, system: "legacy" } } })
+      // Everything else is replaced: two lists of rules have no meaningful merge.
+      expect(ConfigMigrateV1.overlay({ permissions: [{ action: "bash" }] }, { permissions: [] })).toEqual({
+        permissions: [],
+      })
+      expect(ConfigMigrateV1.overlay({ snapshots: false }, { snapshots: true })).toEqual({ snapshots: true })
+    }),
+  )
+
   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>
     Effect.sync(() => {
       FastCheck.assert(
@@ -258,6 +434,213 @@ describe("Config", () => {
               resource: "openai",
             })
             expect(yield* Effect.promise(() => fs.readFile(file, "utf8"))).toBe(contents)
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps both halves of a half-migrated config file", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // One legacy key sends the whole file through the V1 reading, which has nowhere to put
+          // `agents`. Before it was laid back on top, everything written in the new spelling was
+          // dropped without a word.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                agent: { build: { prompt: "legacy" } },
+                agents: { helper: { description: "current" } },
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.agents?.["helper"]?.description).toBe("current")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps the legacy half when the authored half does not decode", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // Laying the authored half on top means it has to decode. Failing the whole file for it
+          // would drop settings that have always loaded, so only the unreadable half is dropped.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                agent: { build: { prompt: "legacy" } },
+                agents: { helper: { description: 5 } },
+                commands: { review: { template: "Review changes" } },
+                snapshots: false,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.agents?.["helper"]).toBeUndefined()
+            // The keys written beside the unreadable one are readable, and cost nothing for it.
+            expect(documents[0]?.info.commands?.["review"]?.template).toBe("Review changes")
+            expect(documents[0]?.info.snapshots).toBe(false)
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps the rest of a legacy file when one of its keys is written wrongly", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `skills` here is neither shape — a plain typo. It used to take the file with it, while
+          // the same typo in a key only V2 has cost only that key.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                agent: { build: { prompt: "legacy" } },
+                skills: 5,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.skills).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("never keeps the half of a permission pair that allows without the half that denies", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `denied` is not an action a rule may take — a typo for `deny`. V1 writes allowances in
+          // `tools` and qualifies them in `permission`, and both become one ruleset: keeping the
+          // allowance while dropping the denial would leave this file more permissive than written.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                tools: { bash: true },
+                permission: { bash: { "rm *": "denied" } },
+                share: "sometimes",
+                autoshare: true,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.permissions).toBeUndefined()
+            // The same pairing protects a fallback: dropping the key that was written would let the
+            // one it overrides through, turning on automatic sharing nobody asked for.
+            expect(documents[0]?.info.share).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps the rest of a current-shape file when one of its keys is written wrongly", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // The shape people are moving to deserves the rule the legacy one gets.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                model: "anthropic/claude",
+                agents: { build: { system: "current" } },
+                skills: 5,
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.model).toBe("anthropic/claude")
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("current")
+            expect(documents[0]?.info.skills).toBeUndefined()
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+        }),
+      ),
+    ),
+  )
+
+  it.live("reads a shared key written in the current shape next to a legacy one", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          // `mcp` and `skills` are spelled the same in both shapes. One legacy key sends the file to
+          // the V1 parser, which rejects their V2 shape outright — and rejecting it used to take
+          // every other setting in the file with it.
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              path.join(tmp.path, "opencode.json"),
+              JSON.stringify({
+                agent: { build: { prompt: "legacy" } },
+                mcp: { servers: { srv: { type: "remote", url: "https://example.test/mcp" } } },
+                skills: ["./skill"],
+              }),
+            ),
+          )
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+
+            expect(documents[0]?.info.agents?.["build"]?.system).toBe("legacy")
+            expect(documents[0]?.info.mcp?.servers?.["srv"]).toMatchObject({ url: "https://example.test/mcp" })
+            expect(documents[0]?.info.skills).toEqual(["./skill"])
           }).pipe(Effect.provide(testLayer(tmp.path)))
         }),
       ),

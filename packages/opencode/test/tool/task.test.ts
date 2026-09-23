@@ -17,6 +17,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import { TaskParallelTool } from "../../src/tool/task-parallel"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -417,6 +418,87 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("execute asks for declared fields and returns them as the result", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({
+        onPrompt: (input) => (seen = input),
+        text: 'Looked into it.\n\n```json\n{ "summary": "fixed the cache key", "files": ["src/cache.ts"] }\n```',
+      })
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          output: [
+            { name: "summary", description: "What was done", type: "string" },
+            { name: "files", description: "Files touched", type: "array" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // The subagent is told what to return, alongside the caller's own prompt.
+      const instructions = seen?.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])) ?? []
+      expect(instructions[0]).toBe("look into the cache key path")
+      expect(instructions.at(-1)).toContain("- summary (string): What was done")
+
+      // The caller gets the object, not the prose around it.
+      expect(JSON.parse(result.output.split("<task_result>")[1]!.split("</task_result>")[0]!)).toEqual({
+        summary: "fixed the cache key",
+        files: ["src/cache.ts"],
+      })
+    }),
+  )
+
+  it.instance("execute fails when the subagent does not return the declared fields", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+            output: [{ name: "summary", description: "What was done", type: "string" }],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ text: "I had a look and it seems fine." }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      if (Exit.isSuccess(exit)) throw new Error("expected the task to fail")
+      // The message carries the task_id, so the caller can resume and say what was wrong.
+      expect(Cause.squash(exit.cause)).toMatchObject({
+        message: expect.stringContaining("did not return the requested fields"),
+      })
+    }),
+  )
+
   it.instance("execute cancels child session when abort signal fires", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed()
@@ -619,6 +701,11 @@ describe("tool.task", () => {
         expect(child.permission).toEqual([
           {
             permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          },
+          {
+            permission: "task-parallel",
             pattern: "*",
             action: "deny",
           },
@@ -1096,6 +1183,340 @@ describe("tool.task", () => {
 
       expect((yield* jobs.get(child.id))?.status).toBe("cancelled")
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
+    }),
+  )
+})
+
+describe("tool.task-parallel", () => {
+  it.instance("execute asks for the task permission once per subtask", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const calls: unknown[] = []
+
+      yield* def.execute(
+        {
+          tasks: [
+            { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+            { description: "read docs", prompt: "summarize the readme", subagent_type: "explore" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: (input) =>
+            Effect.sync(() => {
+              calls.push(input)
+            }),
+        },
+      )
+
+      expect(calls).toEqual([
+        {
+          permission: "task",
+          patterns: ["general"],
+          always: ["*"],
+          metadata: { description: "inspect bug", subagent_type: "general" },
+        },
+        {
+          permission: "task",
+          patterns: ["explore"],
+          always: ["*"],
+          metadata: { description: "read docs", subagent_type: "explore" },
+        },
+      ])
+    }),
+  )
+
+  it.instance(
+    "execute keeps primary-only tools out of fan-out children",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskParallelTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            tasks: [
+              { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+              { description: "read docs", prompt: "summarize the readme", subagent_type: "general" },
+            ],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        for (const sessionID of result.metadata.subtaskSessions) {
+          const child = yield* sessions.get(sessionID)
+          expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "deny" })
+          expect(child.permission).toContainEqual({ permission: "read", pattern: "*", action: "deny" })
+        }
+      }),
+    {
+      config: {
+        experimental: {
+          primary_tools: ["bash", "read"],
+        },
+      },
+    },
+  )
+
+  it.instance("a failing subtask is reported without tearing down its siblings", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            const text = input.parts.find((part) => part.type === "text")?.text ?? ""
+            return reply(
+              input,
+              "finished",
+              text.includes("explode")
+                ? new SessionV1.APIError({ message: "Network connection lost", isRetryable: false }).toObject()
+                : undefined,
+            )
+          }),
+      }
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            { description: "healthy one", prompt: "do the work", subagent_type: "general" },
+            { description: "broken one", prompt: "explode please", subagent_type: "general" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("- healthy one: COMPLETED")
+      expect(result.output).toContain("  finished")
+      expect(result.output).toContain("- broken one: ERROR")
+      expect(result.output).toContain("Network connection lost")
+
+      // Each child runs as a background job keyed by its session id, which is what lets the UI and
+      // recursive cancellation reach it while it is still running.
+      expect((yield* jobs.get(result.metadata.subtaskSessions[0]!))?.status).toBe("completed")
+      expect((yield* jobs.get(result.metadata.subtaskSessions[1]!))?.status).toBe("error")
+    }),
+  )
+
+  it.instance("declared fields are enforced per subtask", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() =>
+            reply(
+              input,
+              input.parts.some((part) => part.type === "text" && part.text.includes("answer in prose"))
+                ? "I had a look and it seems fine."
+                : '```json\n{ "status": "done" }\n```',
+            ),
+          ),
+      }
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            {
+              description: "structured one",
+              prompt: "do the work",
+              subagent_type: "general",
+              output: [{ name: "status", description: "How it went", type: "string" }],
+            },
+            {
+              description: "prose one",
+              prompt: "answer in prose please",
+              subagent_type: "general",
+              output: [{ name: "status", description: "How it went", type: "string" }],
+            },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("- structured one: COMPLETED")
+      expect(result.output).toContain('"status": "done"')
+      // One subtask ignoring the shape does not cost the caller the others.
+      expect(result.output).toContain("- prose one: ERROR")
+      expect(result.output).toContain("did not return the requested fields")
+    }),
+  )
+
+  it.instance("a subtask that dies does not take its siblings down with it", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      // The prompt layer turns its errors into defects, and a defect inside a concurrent forEach
+      // interrupts the sibling fibers. Running each subtask as its own job is what contains it.
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          input.parts.some((part) => part.type === "text" && part.text.includes("explode"))
+            ? Effect.die(new Error("prompt layer defect"))
+            : Effect.sync(() => reply(input, "finished")),
+      }
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            { description: "healthy one", prompt: "do the work", subagent_type: "general" },
+            { description: "broken one", prompt: "explode please", subagent_type: "general" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("- healthy one: COMPLETED")
+      expect(result.output).toContain("  finished")
+      expect(result.output).toContain("- broken one: ERROR")
+      expect(result.output).toContain("prompt layer defect")
+    }),
+  )
+
+  it.instance("cancelling the parent session cancels the fan-out children", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const runState = yield* SessionRunState.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+      const started = defer<string[]>()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: () => Effect.never,
+      }
+
+      const fiber = yield* def
+        .execute(
+          {
+            tasks: [
+              { description: "first", prompt: "wait here", subagent_type: "general" },
+              { description: "second", prompt: "wait here too", subagent_type: "general" },
+            ],
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            // The tool publishes the child session ids before the subtasks finish, which is what
+            // lets anything outside the call reach them while they run.
+            metadata: (input) =>
+              Effect.sync(() => {
+                const sessions = input.metadata?.subtaskSessions
+                if (Array.isArray(sessions)) started.resolve(sessions as string[])
+              }),
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild)
+
+      const sessions = yield* Effect.promise(() => started.promise)
+      expect(sessions).toHaveLength(2)
+
+      yield* runState.cancel(chat.id)
+      const result = yield* Fiber.join(fiber)
+
+      for (const sessionID of sessions) {
+        expect((yield* jobs.get(sessionID))?.status).toBe("cancelled")
+      }
+      expect(result.output).toContain("- first: CANCELLED")
+      expect(result.output).toContain("- second: CANCELLED")
+    }),
+  )
+
+  it.instance("execute fans out to one child session per subtask and denies nested fan-out", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskParallelTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          tasks: [
+            { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+            { description: "read docs", prompt: "summarize the readme", subagent_type: "explore" },
+          ],
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.metadata.subtaskSessions).toHaveLength(2)
+      expect(result.output).toContain("- inspect bug: COMPLETED")
+      expect(result.output).toContain("- read docs: COMPLETED")
+
+      const child = yield* sessions.get(result.metadata.subtaskSessions[0])
+      expect(child.parentID).toBe(chat.id)
+      expect(child.permission).toContainEqual({ permission: "task", pattern: "*", action: "deny" })
+      expect(child.permission).toContainEqual({ permission: "task-parallel", pattern: "*", action: "deny" })
     }),
   )
 })

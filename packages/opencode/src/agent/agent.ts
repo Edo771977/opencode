@@ -48,10 +48,13 @@ export const Info = Schema.Struct({
       providerID: ProviderV2.ID,
     }),
   ),
+  small: Schema.optional(Schema.Boolean),
   variant: Schema.optional(Schema.String),
   prompt: Schema.optional(Schema.String),
   options: Schema.Record(Schema.String, Schema.Unknown),
   steps: Schema.optional(Schema.Finite),
+  budget: Schema.optional(Schema.Finite),
+  budgetStop: Schema.optional(Schema.Finite),
 }).annotate({ identifier: "Agent" })
 export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>
 
@@ -279,6 +282,7 @@ const layer = Layer.effect(
               native: false,
             }
           if (value.model) item.model = Provider.parseModel(value.model)
+          item.small = value.small ?? item.small
           item.variant = value.variant ?? item.variant
           item.prompt = value.prompt ?? item.prompt
           item.description = value.description ?? item.description
@@ -289,6 +293,8 @@ const layer = Layer.effect(
           item.hidden = value.hidden ?? item.hidden
           item.name = value.name ?? item.name
           item.steps = value.steps ?? item.steps
+          item.budget = value.budget ?? item.budget
+          item.budgetStop = value.budget_stop ?? item.budgetStop
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
         }

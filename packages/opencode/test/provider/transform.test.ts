@@ -555,7 +555,9 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
           role: "user",
           time: { created: Date.now() },
           agent: "test",
-          model: { providerID: "azure", modelID: "gpt-5.4", variant: "high" },
+          // The id the user message records is the one the model is keyed by, which is what
+          // `model.id` is above; a variant applies only when the request goes to that same model.
+          model: { providerID: "azure", modelID: "azure/gpt-5.4", variant: "high" },
         } as any,
         sessionID,
         model,

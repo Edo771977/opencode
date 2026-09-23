@@ -26,6 +26,7 @@ type PrepareInput = {
   readonly permission?: PermissionV1.Ruleset
   readonly system: string[]
   readonly messages: ModelMessage[]
+  readonly variant?: string
   readonly small?: boolean
   readonly tools: Record<string, Tool>
   readonly provider: Provider.Info
@@ -77,9 +78,18 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     system.push(header, rest.join("\n"))
   }
 
+  // A variant is chosen for one model, and the same name on another model is a different setting
+  // or none at all — reasoning variants are generated per model, so the names collide across a
+  // provider. The user message's variant applies only when the request goes to the model it was
+  // chosen for; a request moved to another model carries only a variant chosen for that one.
+  const chosenFor =
+    input.model.id === input.user.model.modelID && input.model.providerID === input.user.model.providerID
+  const requested = chosenFor ? input.user.model.variant : input.variant
+  // `hasOwn`, because a name like `constructor` resolves on any object and would merge a function
+  // into the request options.
   const variant =
-    !input.small && input.model.variants && input.user.model.variant
-      ? input.model.variants[input.user.model.variant]
+    !input.small && requested && input.model.variants && Object.hasOwn(input.model.variants, requested)
+      ? input.model.variants[requested]
       : {}
   const base = input.small
     ? ProviderTransform.smallOptions(input.model)

@@ -317,12 +317,14 @@ describe("CatalogV2", () => {
       yield* catalog.transform((catalog) => {
         catalog.provider.update(providerID, () => {})
         catalog.model.update(providerID, ModelV2.ID.make("cheap-large"), (model) => {
+          model.capabilities.tools = true
           model.capabilities.input = ["text"]
           model.capabilities.output = ["text"]
           model.cost = [{ input: 1, output: 1, cache: { read: 0, write: 0 } }]
           model.time.released = Date.now()
         })
         catalog.model.update(providerID, ModelV2.ID.make("expensive-mini"), (model) => {
+          model.capabilities.tools = true
           model.capabilities.input = ["text"]
           model.capabilities.output = ["text"]
           model.cost = [{ input: 10, output: 10, cache: { read: 0, write: 0 } }]
@@ -331,6 +333,33 @@ describe("CatalogV2", () => {
       })
 
       expect((yield* catalog.model.small(providerID))?.id).toMatch("expensive-mini")
+    }),
+  )
+
+  it.effect("small model skips candidates that cannot call tools", () =>
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      const providerID = ProviderV2.ID.make("test")
+      yield* catalog.transform((catalog) => {
+        catalog.provider.update(providerID, () => {})
+        // Cheaper and small-sounding, but a turn that carries tool definitions cannot run on it.
+        catalog.model.update(providerID, ModelV2.ID.make("cheap-mini"), (model) => {
+          model.capabilities.tools = false
+          model.capabilities.input = ["text"]
+          model.capabilities.output = ["text"]
+          model.cost = [{ input: 1, output: 1, cache: { read: 0, write: 0 } }]
+          model.time.released = Date.now()
+        })
+        catalog.model.update(providerID, ModelV2.ID.make("capable-flash"), (model) => {
+          model.capabilities.tools = true
+          model.capabilities.input = ["text"]
+          model.capabilities.output = ["text"]
+          model.cost = [{ input: 5, output: 5, cache: { read: 0, write: 0 } }]
+          model.time.released = Date.now()
+        })
+      })
+
+      expect((yield* catalog.model.small(providerID))?.id).toBe(ModelV2.ID.make("capable-flash"))
     }),
   )
 

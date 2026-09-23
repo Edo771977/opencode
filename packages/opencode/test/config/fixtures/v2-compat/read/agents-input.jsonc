@@ -11,5 +11,6 @@
       "disabled": true,
     },
     "quick": { "model": "openai/gpt-4.1#fast", "disabled": false },
+    "triage": { "small": true, "budget": 0.5, "budget_stop": 2 },
   },
 }
