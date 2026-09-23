@@ -59,7 +59,12 @@ runs:
         # e.g. ./patches/ for standard-openapi
         # https://github.com/oven-sh/bun/issues/28147
         if [ "$RUNNER_OS" = "Windows" ]; then
-          bun install --linker hoisted ${{ inputs.install-flags }}
+          # Bun may occasionally fail to rename a patched cache entry on Windows.
+          for attempt in 1 2 3; do
+            bun install --linker hoisted ${{ inputs.install-flags }} && break
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep 5
+          done
         else
           bun install ${{ inputs.install-flags }}
         fi
