@@ -5,7 +5,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
-import { Cause, Effect, Layer, Option } from "effect"
+import { Effect, Layer, Option } from "effect"
 import ignore from "ignore"
 import path from "path"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -25,16 +25,9 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
     })
 
     const findText = Effect.fn("FileHttpApi.findText")(function* (ctx: { query: { pattern: string } }) {
-      console.error("findText called")
       return (yield* ripgrep
         .grep({ cwd: (yield* InstanceState.context).directory, pattern: ctx.query.pattern, limit: 10 })
-        .pipe(
-          Effect.catchCause((cause) => {
-            console.error("findText cause", Cause.pretty(cause))
-            return Effect.failCause(cause)
-          }),
-          Effect.orDie,
-        )).map((match) => ({
+        .pipe(Effect.orDie)).map((match) => ({
         path: { text: match.entry.path },
         lines: { text: match.text },
         line_number: match.line,
@@ -50,17 +43,11 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
     const findFile = Effect.fn("FileHttpApi.findFile")(function* (ctx: {
       query: { query: string; dirs?: "true" | "false"; type?: "file" | "directory"; limit?: number }
     }) {
-      console.error("findFile called")
       const directory = (yield* InstanceState.context).directory
       const limit = ctx.query.limit ?? 10
       const type = ctx.query.type ?? (ctx.query.dirs === "false" ? "file" : undefined)
       const started = performance.now()
-      const found = yield* filesystem(FileSystem.Service.use((fs) => fs.find({ query: ctx.query.query, limit, type }))).pipe(
-        Effect.catchCause((cause) => {
-          console.error("findFile cause", Cause.pretty(cause))
-          return Effect.failCause(cause)
-        }),
-      )
+      const found = yield* filesystem(FileSystem.Service.use((fs) => fs.find({ query: ctx.query.query, limit, type })))
       yield* Effect.logInfo("find file", {
         query: ctx.query.query,
         type,
