@@ -45,6 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup-bun
+      - name: Test Windows ripgrep core
+        working-directory: packages/core
+        continue-on-error: true
+        run: bun test --timeout 30000 test/ripgrep.test.ts
       - name: Test Windows file search
         working-directory: packages/opencode
         run: bun test --timeout 30000 test/server/httpapi-file.test.ts
