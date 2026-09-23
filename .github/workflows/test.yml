@@ -68,7 +68,7 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: packages/core
         run: |
-          bun -e 'import { Effect } from "effect"; import { RipgrepBinary } from "./src/ripgrep/binary"; await Effect.runPromise(Effect.flatMap(RipgrepBinary.Service, (binary) => binary.filepath).pipe(Effect.provide(RipgrepBinary.node)))'
+          bun -e 'import { Effect } from "effect"; import { RipgrepBinary } from "./src/ripgrep/binary"; import { LayerNode } from "./src/effect/layer-node"; await Effect.runPromise(Effect.flatMap(RipgrepBinary.Service, (binary) => binary.filepath).pipe(Effect.provide(LayerNode.compile(RipgrepBinary.node))))'
 
       - name: Run unit tests
         timeout-minutes: 20
