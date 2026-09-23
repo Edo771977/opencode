@@ -2868,7 +2868,7 @@ it.instance("subtask message records the session variant only when it runs the s
     yield* prompt.loop({ sessionID: chat.id })
     const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
     const wrapper = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
-    expect(wrapper?.info.role === "assistant" && wrapper.info.modelID).toBe("test-small")
+    expect(wrapper?.info.role === "assistant" && wrapper.info.modelID).toBe(ModelV2.ID.make("test-small"))
     expect(wrapper?.info.role === "assistant" && wrapper.info.variant).toBeUndefined()
   }),
 )
