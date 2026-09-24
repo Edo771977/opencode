@@ -271,6 +271,7 @@ export function DialogSessionList() {
         const date = new Date(session.time.updated).toDateString()
         return buildOption(session.id, title.group ? `${title.group}:` : date === today ? "Today" : date)
       })
+      .filter((option) => option !== undefined)
 
     return [...pinned.map((id) => buildOption(id, "Pinned")).filter((x) => x !== undefined), ...remaining]
   })
