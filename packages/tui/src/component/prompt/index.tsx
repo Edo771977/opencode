@@ -57,6 +57,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import { cleanupForSubmit, handleBackspace, handleNewline } from "../list-continuation"
 
 registerOpencodeSpinner()
 
@@ -797,6 +798,56 @@ export function Prompt(props: PromptProps) {
     commands: stashCommands(),
   }))
 
+  useBindings(() => ({
+    target: inputTarget,
+    enabled: inputTarget() !== undefined && !props.disabled && store.mode === "normal",
+    commands: [
+      {
+        name: "input.newline",
+        title: "Insert newline with list continuation",
+        category: "Input",
+        run() {
+          const action = handleNewline(input.plainText, input.cursorOffset)
+          if (!action) {
+            input.insertText("\n")
+            return
+          }
+          if (action.type === "clear") {
+            input.setText(input.plainText.slice(0, action.deleteRange.start) + input.plainText.slice(action.deleteRange.end))
+            input.cursorOffset = action.cursorPosition
+            return
+          }
+          input.insertText(action.insertText)
+          if (!action.renumber) return
+          const start = action.renumber.start + action.insertText.length
+          const end = action.renumber.end + action.insertText.length
+          input.setText(input.plainText.slice(0, start) + action.renumber.newText + input.plainText.slice(end))
+          input.cursorOffset = start - 1
+        },
+      },
+    ],
+    bindings: tuiConfig.keybinds.get("input_newline"),
+  }))
+
+  useBindings(() => ({
+    target: inputTarget,
+    enabled: inputTarget() !== undefined && !props.disabled && store.mode === "normal",
+    commands: [
+      {
+        name: "input.backspace",
+        title: "Backspace with list cleanup",
+        category: "Input",
+        run() {
+          const action = handleBackspace(input.plainText, input.cursorOffset)
+          if (!action || action.type !== "clear") return false
+          input.setText(input.plainText.slice(0, action.deleteRange.start) + input.plainText.slice(action.deleteRange.end))
+          input.cursorOffset = action.cursorPosition
+        },
+      },
+    ],
+    bindings: tuiConfig.keybinds.get("input_backspace"),
+  }))
+
   useBindings(() => {
     return {
       target: inputTarget,
@@ -957,10 +1008,16 @@ export function Prompt(props: PromptProps) {
     if (props.disabled) return false
     if (workspace.creating() || move.creating()) return false
     if (auto()?.visible) return false
-    if (!store.prompt.input) return false
+    const cleaned = store.mode === "normal" ? cleanupForSubmit(store.prompt.input) : store.prompt.input
+    if (cleaned !== store.prompt.input) {
+      input.setText(cleaned)
+      input.cursorOffset = Math.min(input.cursorOffset, cleaned.length)
+      setStore("prompt", "input", cleaned)
+    }
+    if (!cleaned) return false
     const agent = local.agent.current()
     if (!agent) return false
-    const trimmed = store.prompt.input.trim()
+    const trimmed = cleaned.trim()
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       void exit()
       return true
