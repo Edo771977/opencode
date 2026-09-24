@@ -79,3 +79,20 @@ test("custom theme precedence follows directory order", async () => {
 
   await expect(discoverThemes([global, project])).resolves.toEqual({ custom: { source: "project" } })
 })
+
+test("custom themes accept JSONC syntax and extension", async () => {
+  await using tmp = await tmpdir()
+  await mkdir(path.join(tmp.path, "themes"), { recursive: true })
+  await writeFile(path.join(tmp.path, "themes", "custom.json"), JSON.stringify({ source: "json" }))
+  await writeFile(path.join(tmp.path, "themes", "custom.jsonc"), '{\n  // user theme\n  "source": "jsonc",\n}\n')
+
+  await expect(discoverThemes([tmp.path])).resolves.toEqual({ custom: { source: "jsonc" } })
+})
+
+test("invalid custom themes report the location of the JSONC error", async () => {
+  await using tmp = await tmpdir()
+  await mkdir(path.join(tmp.path, "themes"), { recursive: true })
+  await writeFile(path.join(tmp.path, "themes", "broken.jsonc"), '{\n  "source": ,\n}')
+
+  await expect(discoverThemes([tmp.path])).rejects.toThrow(/broken\.jsonc:2:\d+: ValueExpected/)
+})
