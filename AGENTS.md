@@ -159,3 +159,23 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default and promote at the next safe provider-turn boundary while the current drain requires continuation. An explicit `queue` input remains pending until the Session would otherwise become idle; promote one queued input at that boundary, then reevaluate continuation before promoting another. Promoting any new user input resets the selected agent's provider-turn allowance; a batch of steers resets it once.
 - Keep EventV2 replay owner claims separate from clustered Session execution ownership.
 - Keep the System Context algebra, registry, and built-ins in `src/system-context`; keep Context Source producers with their observed domains, and keep Session History selection plus Context Epoch persistence Session-owned.
+
+## Agents, Models and Cost
+
+- Run a step entirely on the model that answers it. Cost, the context window it is sized against, the history serialization and the tool definitions all follow the model the request goes to, not the one the session started on. This was got wrong twice, once per runtime.
+- A variant belongs to the model it was chosen for. Names collide across a provider's models, so apply one only when the request goes to that model, and record on the message the variant the request actually carried. A variant the model does not declare as its own is not a variant.
+- `budget` degrades, it does not stop: past it an agent keeps working on the small model and is told once. `budget_stop` is the ceiling, off unless asked for. A run meant to carry work to the end cannot depend on someone noticing that it halted.
+- A model resolved as "small" must still be able to call tools, and must differ from the session model in provider as well as id. The same id on another provider is a different route, different credentials and different billing.
+- A subagent reported as done must say what it left running. Spawning with `background: true` detaches, and the detached task's answer goes to the subagent's own session, so a caller told only "completed" would act on a result that is missing a piece.
+
+## Configuration Compatibility
+
+- A setting written wrongly costs its own key, not the file. Both shapes are read as a whole first and group by group when that fails.
+- Drop together the keys the migration folds into one setting. `tools` and `permission` become one ruleset, and keeping the half that allows while dropping the half that denies leaves a file more permissive than it reads; `share`/`autoshare` and `references`/`reference` are fallbacks with the same hazard.
+- Judge a key both config shapes spell the same by the shape it positively has, never by "not the other one": values both shapes accept exist, and so do values neither fully describes.
+- Say which file was ignored and why. A config that vanishes in silence is how three of these bugs stayed invisible.
+
+## Testing the Session Loop
+
+- Decisions about which model, variant, prompt or tool set a step gets are tested by driving the whole loop against the fake LLM server and asserting on the request that reached the wire. A unit test over the decision function cannot see a decision that is computed correctly and then not applied.
+- Check a new test by breaking the code it covers and watching it fail. Every loop-level test here that matters was written against a bug it first reproduced.
