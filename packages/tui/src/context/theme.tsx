@@ -28,6 +28,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Glob } from "@opencode-ai/core/util/glob"
 import { readFile } from "node:fs/promises"
 import path from "node:path"
+import { parse, printParseErrorCode, type ParseError } from "jsonc-parser"
 
 export type ThemeSource = Readonly<{
   discover(): Promise<Record<string, unknown>>
@@ -52,9 +53,22 @@ const themeSource: ThemeSource = {
 export async function discoverThemes(directories: string[]) {
   const result: Record<string, unknown> = {}
   for (const directory of directories) {
-    const files = await Glob.scan("themes/*.json", { cwd: directory, absolute: true, dot: true, symlink: true })
-    for (const file of files) {
-      result[path.basename(file, ".json")] = JSON.parse(await readFile(file, "utf8")) as unknown
+    for (const pattern of ["themes/*.json", "themes/*.jsonc"]) {
+      const files = await Glob.scan(pattern, { cwd: directory, absolute: true, dot: true, symlink: true })
+      for (const file of files) {
+        const content = await readFile(file, "utf8")
+        const errors: ParseError[] = []
+        const theme = parse(content, errors, { allowTrailingComma: true })
+        if (errors.length) {
+          const error = errors[0]
+          const before = content.slice(0, error.offset)
+          const line = before.split("\n").length
+          const column = before.length - before.lastIndexOf("\n")
+          throw new Error(`Failed to parse theme ${file}:${line}:${column}: ${printParseErrorCode(error.error)}`)
+        }
+        if (theme === undefined) throw new Error(`Empty theme file: ${file}`)
+        result[path.basename(file).replace(/\.(jsonc|json)$/, "")] = theme as unknown
+      }
     }
   }
   return result
