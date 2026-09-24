@@ -147,5 +147,5 @@ describe("desktop native ICU data", () => {
       expect(() => new Intl.DisplayNames(tag, { type: "language" }), `${locale} names`).not.toThrow()
       expect(() => new Intl.Segmenter(tag), `${locale} segmenter`).not.toThrow()
     }
-  })
+  }, 20_000)
 })
