@@ -152,7 +152,8 @@ describe("plugin.azure", () => {
     expect(await cli.calls()).toEqual([
       ["account", "get-access-token", "--scope", "https://cognitiveservices.azure.com/.default", "--output", "json"],
     ])
-  })
+    // bundles the plugin and cold-starts Node twice, which overruns the suite's 30s on Windows runners
+  }, 120_000)
 
   test("does not invoke Azure CLI during initialization", async () => {
     await using tmp = await tmpdir()
