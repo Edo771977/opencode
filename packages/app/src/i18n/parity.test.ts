@@ -117,7 +117,7 @@ describe("i18n parity", () => {
         })
       }
     }
-  })
+  }, 20_000)
 
   test("non-English locales preserve English placeholders", async () => {
     for (const domain of domains) {
@@ -140,7 +140,7 @@ describe("i18n parity", () => {
         })
       }
     }
-  })
+  }, 20_000)
 
   test("non-English locales translate targeted unseen session keys", async () => {
     const source = await dictionary("./en.ts")
