@@ -18,6 +18,7 @@ import { errorMessage } from "../util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { useCommandShortcut } from "../keymap"
 import { useEvent } from "../context/event"
+import { parseSessionTitle } from "../util/session-title"
 
 type SessionListFilter = { scope?: "project"; path?: string }
 
@@ -225,6 +226,7 @@ export function DialogSessionList() {
     function buildOption(id: string, category: string) {
       const x = sessionMap.get(id)
       if (!x) return undefined
+      const title = parseSessionTitle(x.title)
       const directory = x.path
         ? x.directory.endsWith(x.path)
           ? x.directory.slice(0, -x.path.length).replace(/\/$/, "")
@@ -243,7 +245,7 @@ export function DialogSessionList() {
           ? () => <text fg={theme.accent}>{slot}</text>
           : undefined
       return {
-        title: isDeleting ? `Press ${deleteHint()} again to confirm` : x.title,
+        title: isDeleting ? `Press ${deleteHint()} again to confirm` : title.displayTitle,
         bg: isDeleting ? theme.error : undefined,
         value: x.id,
         category,
@@ -254,13 +256,21 @@ export function DialogSessionList() {
 
     const remaining = displayOrder
       .filter((id) => !pinnedSet.has(id))
-      .map((id) => {
-        const x = sessionMap.get(id)
-        if (!x) return undefined
-        const label = new Date(x.time.updated).toDateString()
-        return buildOption(id, label === today ? "Today" : label)
+      .map((id) => sessionMap.get(id))
+      .filter((session) => session !== undefined)
+      .toSorted((a, b) => {
+        const left = parseSessionTitle(a.title).group
+        const right = parseSessionTitle(b.title).group
+        if (left && right) return left.localeCompare(right) || b.time.updated - a.time.updated
+        if (left) return -1
+        if (right) return 1
+        return 0
       })
-      .filter((x) => x !== undefined)
+      .map((session) => {
+        const title = parseSessionTitle(session.title)
+        const date = new Date(session.time.updated).toDateString()
+        return buildOption(session.id, title.group ? `${title.group}:` : date === today ? "Today" : date)
+      })
 
     return [...pinned.map((id) => buildOption(id, "Pinned")).filter((x) => x !== undefined), ...remaining]
   })
