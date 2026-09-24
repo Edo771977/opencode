@@ -100,8 +100,16 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
                   (file) => download(new URL(file, `${host}/${skill.name}/`).href, path.join(staging, file)),
                   { concurrency: fileConcurrency },
                 )
-                if (!downloaded.every(Boolean)) return
-                if (!(yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie))) return
+                if (!downloaded.every(Boolean))
+                  return yield* Effect.logWarning("keeping cached skill, a file did not download", {
+                    skill: skill.name,
+                    version: version,
+                  })
+                if (!(yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie)))
+                  return yield* Effect.logWarning("keeping cached skill, the download has no SKILL.md", {
+                    skill: skill.name,
+                    version: version,
+                  })
                 yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
                 yield* Effect.uninterruptible(
                   Effect.gen(function* () {
