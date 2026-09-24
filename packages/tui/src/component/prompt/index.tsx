@@ -815,6 +815,7 @@ export function Prompt(props: PromptProps) {
           if (action.type === "clear") {
             input.setText(input.plainText.slice(0, action.deleteRange.start) + input.plainText.slice(action.deleteRange.end))
             input.cursorOffset = action.cursorPosition
+            setStore("prompt", "input", input.plainText)
             return
           }
           input.insertText(action.insertText)
@@ -823,6 +824,7 @@ export function Prompt(props: PromptProps) {
           const end = action.renumber.end + action.insertText.length
           input.setText(input.plainText.slice(0, start) + action.renumber.newText + input.plainText.slice(end))
           input.cursorOffset = start - 1
+          setStore("prompt", "input", input.plainText)
         },
       },
     ],
@@ -842,6 +844,7 @@ export function Prompt(props: PromptProps) {
           if (!action || action.type !== "clear") return false
           input.setText(input.plainText.slice(0, action.deleteRange.start) + input.plainText.slice(action.deleteRange.end))
           input.cursorOffset = action.cursorPosition
+          setStore("prompt", "input", input.plainText)
         },
       },
     ],
