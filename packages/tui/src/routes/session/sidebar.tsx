@@ -7,6 +7,7 @@ import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/inst
 import { usePluginRuntime } from "../../plugin/runtime"
 
 import { getScrollAcceleration } from "../../util/scroll"
+import { parseSessionTitle } from "../../util/session-title"
 import { WorkspaceLabel } from "../../component/workspace-label"
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
@@ -16,6 +17,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
   const session = createMemo(() => sync.session.get(props.sessionID))
+  const title = createMemo(() => parseSessionTitle(session()?.title ?? ""))
   const workspace = () => {
     const workspaceID = session()?.workspaceID
     if (!workspaceID) return
@@ -55,7 +57,9 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
             >
               <box paddingRight={1}>
                 <text fg={theme.text}>
-                  <b>{session()!.title}</b>
+                  <Show when={title().group} fallback={<b>{title().displayTitle}</b>}>
+                    <b>{title().group}:</b> {title().displayTitle}
+                  </Show>
                 </text>
                 <Show when={InstallationChannel !== "latest"}>
                   <text fg={theme.textMuted}>{props.sessionID}</text>
