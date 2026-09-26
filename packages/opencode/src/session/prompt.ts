@@ -1187,10 +1187,18 @@ const layer = Layer.effect(
             budget: agent.budget,
             stop: agent.budgetStop,
           })
+          // Crossing the budget is a checkpoint when the agent's ruleset asks for one: the person is
+          // told what has been spent and decides whether the agent keeps working, instead of it
+          // quietly becoming cheaper. `allow`, the default, keeps the degrading behaviour; `deny`
+          // ends the run at the crossing without asking anybody.
+          const limit = agent.budget
+          const checkpoint = limit === undefined ? "allow" : Permission.evaluate("budget", "*", agent.permission).action
           // An agent configured `small` is on the cheap model for every turn, the summary turn at a
           // ceiling included. A degraded one is not: that last turn is text-only and has to say what
-          // was done and what is left, which is the wrong place to save a few cents.
-          const wantsSmall = agent.small === true || (budget.degrade && !budget.stop)
+          // was done and what is left, which is the wrong place to save a few cents. Nor is one whose
+          // budget is a checkpoint: degrading a run somebody just authorized answers a question
+          // nobody asked, and the turn that reports a refusal is that same summary turn.
+          const wantsSmall = agent.small === true || (budget.degrade && !budget.stop && checkpoint === "allow")
           const candidate = wantsSmall ? yield* provider.getSmallModel(model.providerID) : undefined
           // The same guards the V2 resolver applies: an agent turn carries tool definitions, so a
           // model that cannot call them is no substitute however cheap, and a "small" model that is
@@ -1215,8 +1223,6 @@ const layer = Layer.effect(
             Object.hasOwn(small.variants ?? {}, configuredSmall.variant)
               ? configuredSmall.variant
               : undefined
-          const isLastStep = step >= maxSteps || budget.stop
-
           // Sized against the model the request will hit, not the one the session started on: a
           // degraded turn may face a much smaller context window.
           if (
@@ -1227,6 +1233,35 @@ const layer = Layer.effect(
             yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
             continue
           }
+          // Asked here rather than beside the decision above because this is the last point the loop
+          // can still turn back: an iteration that compacts and starts over would put the same
+          // question a second time and throw the first answer away, spend not having moved.
+          // A refusal ends the run the way the ceiling does, and carries what the person said with it.
+          const declined =
+            limit !== undefined && budget.checkpoint && checkpoint !== "allow"
+              ? yield* permission
+                  .ask({
+                    permission: "budget",
+                    patterns: ["*"],
+                    sessionID,
+                    metadata: { spent: budget.spent, budget: limit },
+                    always: ["*"],
+                    ruleset: agent.permission,
+                  })
+                  .pipe(
+                    Effect.as(undefined),
+                    Effect.catch((error) =>
+                      Effect.succeed(
+                        SessionBudgetPrompt.declined({
+                          spent: budget.spent,
+                          budget: limit,
+                          feedback: error._tag === "PermissionCorrectedError" ? error.feedback : undefined,
+                        }),
+                      ),
+                    ),
+                  )
+              : undefined
+          const isLastStep = step >= maxSteps || budget.stop || declined !== undefined
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),
@@ -1331,6 +1366,14 @@ const layer = Layer.effect(
               : format.type === "json_schema"
                 ? { StructuredOutput: tools["StructuredOutput"] }
                 : {}
+            const stepNote = stepNotice({
+              lastStep: isLastStep,
+              declined,
+              budget,
+              limit,
+              checkpoint,
+              small: small?.id,
+            })
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1340,25 +1383,7 @@ const layer = Layer.effect(
               system,
               messages: [
                 ...modelMsgs,
-                ...(isLastStep
-                  ? [
-                      {
-                        role: "assistant" as const,
-                        content: budget.stop ? SessionBudgetPrompt.EXHAUSTED_PROMPT : MAX_STEPS_PROMPT,
-                      },
-                    ]
-                  : budget.crossed && agent.budget !== undefined
-                    ? [
-                        {
-                          role: "assistant" as const,
-                          content: SessionBudgetPrompt.notice({
-                            spent: budget.spent,
-                            budget: agent.budget,
-                            model: small?.id,
-                          }),
-                        },
-                      ]
-                    : []),
+                ...(stepNote === undefined ? [] : [{ role: "assistant" as const, content: stepNote }]),
               ],
               tools: stepTools,
               model: stepModel,
@@ -1710,3 +1735,27 @@ export const node = LayerNode.make({
 })
 
 export * as SessionPrompt from "./prompt"
+
+/**
+ * The one thing the loop says to the agent before a step, if anything: that it may not call tools
+ * and why, or that it has crossed its budget and what that changed. Kept beside the other endings
+ * rather than inside the request, where they read as a nested ternary with no room for another.
+ */
+function stepNotice(input: {
+  readonly lastStep: boolean
+  readonly declined: string | undefined
+  readonly budget: SessionBudget.Decision
+  readonly limit: number | undefined
+  readonly checkpoint: PermissionV1.Rule["action"]
+  readonly small: string | undefined
+}) {
+  // A refusal is its own ending: the run stops like it does at the ceiling, but somebody chose it.
+  if (input.declined !== undefined) return input.declined
+  if (input.lastStep) return input.budget.stop ? SessionBudgetPrompt.EXHAUSTED_PROMPT : MAX_STEPS_PROMPT
+  if (input.limit === undefined) return undefined
+  if (input.budget.checkpoint && input.checkpoint !== "allow")
+    return SessionBudgetPrompt.authorized({ spent: input.budget.spent, budget: input.limit })
+  if (input.budget.crossed)
+    return SessionBudgetPrompt.notice({ spent: input.budget.spent, budget: input.limit, model: input.small })
+  return undefined
+}

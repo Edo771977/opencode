@@ -55,6 +55,10 @@ function text(v: unknown): string {
   return typeof v === "string" ? v : ""
 }
 
+function dollars(v: unknown) {
+  return typeof v === "number" && Number.isFinite(v) ? `$${v.toFixed(2)}` : undefined
+}
+
 function data(request: PermissionRequest): Dict {
   const meta = dict(request.metadata)
   return {
@@ -113,6 +117,22 @@ export function permissionInfo(request: PermissionRequest): PermissionInfo {
       icon: "⟳",
       title: "Continue after repeated failures",
       lines: ["This keeps the session running despite repeated failures."],
+    }
+  }
+
+  if (request.permission === "budget") {
+    const meta = dict(request.metadata)
+    const spent = dollars(meta.spent)
+    const budget = dollars(meta.budget)
+    return {
+      icon: "$",
+      title: budget === undefined ? "Keep working past the budget" : `Keep working past the ${budget} budget`,
+      lines: [
+        spent === undefined || budget === undefined
+          ? "This agent has reached the budget set for it in this session."
+          : `This agent has spent ${spent} of its ${budget} budget for this session.`,
+        "Rejecting it ends the run with a summary of what was done and what is left.",
+      ],
     }
   }
 

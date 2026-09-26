@@ -197,6 +197,28 @@ describe("SessionBudget.evaluate", () => {
     ).toMatchObject({ spent: 0.2, spentOnRequest: 0.2, degrade: false, stop: false })
   })
 
+  test("checks in at every multiple of the budget, not only the first", () => {
+    // What makes an answered checkpoint buy another budget's worth rather than lift the budget for
+    // good. `crossed` stays the first crossing alone: that one is a notice, and it is told once.
+    const base = { agent: "build", request: REQUEST, budget: 1, stop: undefined } as const
+    expect(SessionBudget.evaluate({ ...base, messages: [turn("build", 0.6), turn("build", 0.5)] })).toMatchObject({
+      crossed: true,
+      checkpoint: true,
+    })
+
+    // Past the budget, not past the next multiple: nothing to ask about yet.
+    expect(SessionBudget.evaluate({ ...base, messages: [turn("build", 1.1), turn("build", 0.2)] })).toMatchObject({
+      crossed: false,
+      checkpoint: false,
+    })
+
+    // The turn that passes twice the budget asks again.
+    expect(SessionBudget.evaluate({ ...base, messages: [turn("build", 1.5), turn("build", 0.6)] })).toMatchObject({
+      crossed: false,
+      checkpoint: true,
+    })
+  })
+
   test("a fresh session has spent nothing", () => {
     expect(
       SessionBudget.evaluate({ messages: [], agent: "build", request: REQUEST, budget: 1, stop: 2 }),

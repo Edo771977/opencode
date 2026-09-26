@@ -11,6 +11,8 @@ export type Decision = {
   readonly degrade: boolean
   /** This is the step that reached it, so the agent is told once rather than every turn. */
   readonly crossed: boolean
+  /** Spend has just passed another whole multiple of the budget: the step to ask at, if asking. */
+  readonly checkpoint: boolean
   /** The ceiling was reached: stop after a final text-only turn. */
   readonly stop: boolean
 }
@@ -67,6 +69,9 @@ export function evaluate(input: {
     spentOnRequest,
     degrade: budget !== undefined && spent >= budget,
     crossed: budget !== undefined && spent >= budget && before < budget,
+    // Every multiple, not only the first: a checkpoint the person answers buys another budget's
+    // worth rather than lifting the budget for good, so the number keeps meaning something.
+    checkpoint: budget !== undefined && Math.floor(spent / budget) > Math.floor(before / budget),
     stop: input.stop !== undefined && spentOnRequest >= input.stop,
   }
 }
