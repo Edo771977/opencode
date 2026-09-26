@@ -13,7 +13,11 @@ const turn = (agent: string, cost: number, parentID = REQUEST) =>
     parts: [],
   }) as unknown as SessionV1.WithParts
 
-const user = () => ({ info: { role: "user" }, parts: [] }) as unknown as SessionV1.WithParts
+const user = (id = REQUEST, parts: unknown[] = []) =>
+  ({ info: { role: "user", id, time: { created: ++clock } }, parts }) as unknown as SessionV1.WithParts
+
+// The loop queues a compaction as a user message of its own, carrying the part that describes it.
+const compaction = (auto: boolean, id: string) => user(id, [{ type: "compaction", auto }])
 
 describe("SessionBudget.evaluate", () => {
   test("counts only what this agent spent in this session", () => {
@@ -145,6 +149,52 @@ describe("SessionBudget.evaluate", () => {
         stop: 1,
       }),
     ).toMatchObject({ spent: 5.2, spentOnRequest: 0.2, degrade: true, stop: false })
+  })
+
+  test("an automatic compaction does not hand the request a fresh allowance", () => {
+    // Both of the loop's own user messages: the compaction it queued, and the continuation that
+    // compaction wrote. Counted as requests of their own, a run would buy itself another ceiling
+    // every time it compacted — which is every time it needed to keep going.
+    const human = user("msg_human")
+    const queued = compaction(true, "msg_compaction")
+    const carried = user("msg_continue")
+    expect(
+      SessionBudget.evaluate({
+        messages: [human, turn("build", 5, "msg_human"), queued, carried, turn("build", 0.1, "msg_continue")],
+        agent: "build",
+        request: "msg_continue",
+        budget: undefined,
+        stop: 1,
+      }),
+    ).toMatchObject({ spentOnRequest: 5.1, stop: true })
+  })
+
+  test("a manual compaction ends the chain", () => {
+    // It queues its own message but writes no continuation, so what follows is the person's ask.
+    const human = user("msg_human")
+    const queued = compaction(false, "msg_compaction")
+    const next = user("msg_next")
+    expect(
+      SessionBudget.evaluate({
+        messages: [human, turn("build", 5, "msg_human"), queued, next],
+        agent: "build",
+        request: "msg_next",
+        budget: undefined,
+        stop: 1,
+      }),
+    ).toMatchObject({ spentOnRequest: 0, stop: false })
+  })
+
+  test("another agent's turns on the same request are not counted", () => {
+    expect(
+      SessionBudget.evaluate({
+        messages: [user(), turn("build", 0.2), turn("reviewer", 9)],
+        agent: "build",
+        request: REQUEST,
+        budget: 1,
+        stop: 1,
+      }),
+    ).toMatchObject({ spent: 0.2, spentOnRequest: 0.2, degrade: false, stop: false })
   })
 
   test("a fresh session has spent nothing", () => {

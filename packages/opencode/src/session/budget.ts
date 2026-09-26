@@ -22,9 +22,9 @@ export type Decision = {
  *
  * The two thresholds count different things, because they answer different questions. The soft
  * threshold asks what this agent has cost in this session and counts every turn it has taken. The
- * ceiling asks what one request was allowed to cost and counts only the turns answering the user
- * message in hand: it is there to end a run that will not end on its own, and a run is what one
- * request sets off. Counted over the session it would end the session instead — spend never goes
+ * ceiling asks what one request was allowed to cost and counts only the turns answering it: it is
+ * there to end a run that will not end on its own, and a run is what one request sets off. Which
+ * user messages make up one request is `requestChain`'s job, and not the obvious answer. Counted over the session it would end the session instead — spend never goes
  * down, so the ceiling stays reached, every later request is answered by a summary that costs more
  * than the last, and no work can ever be done again. The prompt an agent is shown at the ceiling
  * already tells it that tools come back with the next user input; this is what makes that true.
@@ -35,7 +35,7 @@ export type Decision = {
 export function evaluate(input: {
   readonly messages: readonly SessionV1.WithParts[]
   readonly agent: string
-  /** The user message being answered: the turns answering it carry its id as their `parentID`. */
+  /** The newest user message. The turns answering a message carry its id as their `parentID`. */
   readonly request: string
   readonly budget: number | undefined
   readonly stop: number | undefined
@@ -44,9 +44,8 @@ export function evaluate(input: {
     message.info.role === "assistant" && message.info.agent === input.agent ? [message.info] : [],
   )
   const spent = turns.reduce((total, turn) => total + turn.cost, 0)
-  const spentOnRequest = turns
-    .filter((turn) => turn.parentID === input.request)
-    .reduce((total, turn) => total + turn.cost, 0)
+  const chain = requestChain(input.messages, input.request)
+  const spentOnRequest = turns.filter((turn) => chain.has(turn.parentID)).reduce((total, turn) => total + turn.cost, 0)
   // What was spent before the most recent turn, which is how a threshold reached now is told apart
   // from one reached several turns ago. The most recent turn is searched for rather than taken from
   // the end of the list: history reaches here in whichever order the caller had it, and reading the
@@ -70,4 +69,43 @@ export function evaluate(input: {
     crossed: budget !== undefined && spent >= budget && before < budget,
     stop: input.stop !== undefined && spentOnRequest >= input.stop,
   }
+}
+
+/** Oldest first, the way the message store itself orders: by creation time and then by id. */
+const oldestFirst = (a: SessionV1.WithParts, b: SessionV1.WithParts) =>
+  a.info.time.created - b.info.time.created || (a.info.id < b.info.id ? -1 : 1)
+
+const compactionPart = (message: SessionV1.WithParts) =>
+  message.parts.find((part): part is SessionV1.CompactionPart => part.type === "compaction")
+
+/**
+ * The user messages the ceiling counts as one request. Usually that is the single message a person
+ * sent, but the loop writes user messages of its own to keep one request going: `SessionCompaction`
+ * queues a compaction as a user message carrying a `compaction` part, and an automatic compaction
+ * then writes the message telling the agent to continue — or replays the original request when media
+ * had to be stripped out of it. Those are the runtime talking to itself. Counted as requests of
+ * their own they hand the run a fresh allowance every time it compacts, which is every time it needs
+ * to keep going, so a long run — the one thing a ceiling exists for — never reaches it at all.
+ *
+ * A manual compaction ends the chain. It queues its own message but writes no continuation, so the
+ * message after it is the person's and starts a request of its own. The one case this reads wrongly
+ * is an automatic compaction whose continuation a plugin suppressed: the person's next message then
+ * sits where the continuation would have, and is counted with what came before. It costs that one
+ * message its tools rather than the session, which is the safer way to be wrong here.
+ */
+function requestChain(messages: readonly SessionV1.WithParts[], request: string) {
+  const users = messages.filter((message) => message.info.role === "user").sort(oldestFirst)
+  const upto = users.slice(0, users.findIndex((message) => message.info.id === request) + 1)
+  if (upto.length === 0) return new Set([request])
+  return new Set(
+    upto.reduce<string[]>((chain, message, index) => {
+      const previous = upto[index - 1]
+      // A compaction's own message belongs to the request it was queued for, and the message after
+      // an automatic compaction is the continuation that compaction wrote for that same request.
+      return previous !== undefined &&
+        (compactionPart(message) !== undefined || compactionPart(previous)?.auto === true)
+        ? [...chain, message.info.id]
+        : [message.info.id]
+    }, []),
+  )
 }

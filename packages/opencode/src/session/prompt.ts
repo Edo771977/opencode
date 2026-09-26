@@ -1096,7 +1096,7 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          // The budget is counted from the whole session, the model sees only what survives
+          // Both thresholds are counted from the full history, the model sees only what survives
           // compaction. Reading the history once serves both: `filterCompacted` trims to a tail for
           // the context window, so spending it as the record of what was spent would reset an
           // agent's budget every time a long session compacts.

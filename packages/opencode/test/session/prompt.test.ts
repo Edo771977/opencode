@@ -2500,6 +2500,7 @@ function budgetCfg(
   agent: { small?: boolean; steps?: number; budget?: number; budget_stop?: number },
   smallModel = "test/test-small",
   cost = { input: 0, output: 0 },
+  limit = { context: 100000, output: 10000 },
 ) {
   return (url: string) => {
     const base = providerCfg(url)
@@ -2512,7 +2513,7 @@ function budgetCfg(
           models: {
             ...base.provider.test.models,
             // Free by default, so the tests that seed a spend see only what they seeded.
-            "test-model": { ...base.provider.test.models["test-model"], cost },
+            "test-model": { ...base.provider.test.models["test-model"], cost, limit },
             "test-small": {
               ...base.provider.test.models["test-model"],
               id: "test-small",
@@ -2654,6 +2655,52 @@ it.instance("loop gives a new request its tools back after an earlier one reache
     expect(hits[0]?.body.tools).toBeDefined()
     expect(JSON.stringify(hits[0]?.body)).not.toContain("BUDGET EXHAUSTED")
   }),
+)
+
+it.instance(
+  "loop holds the ceiling across an automatic compaction of the same request",
+  () =>
+    Effect.gen(function* () {
+      // One turn of 100 output tokens costs $0.09 against a $0.05 ceiling, and its 1600 input tokens
+      // overflow a 2000-token window, so the loop compacts and the compaction writes the user
+      // message that tells the agent to continue. That message is the runtime talking to itself: if
+      // it counted as a request of its own, the run would get a fresh allowance every time it
+      // compacted, which is every time it needed to keep going.
+      const { llm } = yield* useServerConfig(
+        budgetCfg({ budget_stop: 0.05 }, "test/test-small", { input: 0, output: 900 }, { context: 2000, output: 500 }),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      // Enough overflowing turns queued that the run would keep buying itself another ceiling.
+      for (const index of [0, 1, 2, 3]) {
+        yield* llm.push(
+          reply()
+            .tool("glob", { pattern: `**/*.t${index}` })
+            .usage({ input: 1600, output: 100 }),
+        )
+        yield* llm.text(`compacted ${index}`)
+      }
+      yield* llm.text("summary")
+
+      yield* prompt.loop({ sessionID: chat.id })
+      const hits = yield* llm.hits
+      // Only the first turn was under the ceiling. Every request after it went out without tools,
+      // the compaction's own included, and one of them carried the ceiling's prompt.
+      expect(hits.filter((hit) => Array.isArray(hit.body.tools)).length).toBe(1)
+      expect(hits.some((hit) => JSON.stringify(hit.body).includes("BUDGET EXHAUSTED"))).toBe(true)
+    }),
+  60_000,
 )
 
 it.instance("loop runs an agent configured small on the small model", () =>
