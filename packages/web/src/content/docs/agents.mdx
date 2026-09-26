@@ -362,7 +362,9 @@ Degrading suits a run nobody is watching. While you are working, being handed a 
 
 Now crossing the budget stops to ask you, showing what has been spent against what was allowed. Say yes and the agent carries on with the model and the tools it had — degrading a run you just agreed to pay for would answer a question you did not ask. Say no and the run ends the way the ceiling ends one: one turn, no tools, a summary of what was done and what is left, and whatever you typed as a reason is passed on to it so the summary answers it.
 
-You are asked once per message. The answer covers the rest of that request and the next message asks again, so what you agree to is bounded by the request in front of you rather than by the session; answer _Always_ and it stops asking until you restart, like any other permission. If a single authorized request also needs a bound it cannot pass, that is what `budget_stop` is for.
+You are asked once per message — including a message you type while the agent is still working, which is its own request and gets its own question. The answer covers the rest of that request and the next message asks again, so what you agree to is bounded by the request in front of you rather than by the session. If a single authorized request also needs a bound it cannot pass, that is what `budget_stop` is for.
+
+Answering _Always_ stops the asking until you restart, like any other permission, and like any other permission that reaches every session open on the same project rather than only the one you answered in.
 
 `"deny"` never lets the agent work past the budget: every request that starts over it ends there, which is what you want on an agent that should never quietly cost more than its number.
 

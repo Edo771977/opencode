@@ -29,16 +29,19 @@ export const notice = (input: { spent: number; budget: number; model: string | u
   ].join("\n")
 
 /**
- * What the agent is told when the budget was a checkpoint and the person said to keep going. It
- * keeps the model and the tools it had — degrading a run somebody just paid to continue would answer
- * a question nobody asked — so the only thing to say is what it has cost and to spend the rest well.
+ * What the agent is told when the budget was a checkpoint and going further was allowed. It keeps the
+ * model and the tools it had — degrading a run somebody just paid to continue would answer a question
+ * nobody asked — so the only thing to say is what it has cost and to spend the rest well.
+ *
+ * It does not claim a conversation. The permission may have been allowed by a standing rule from an
+ * earlier answer, in which case nobody was asked anything this time.
  */
 export const authorized = (input: { spent: number; budget: number }) =>
   [
     "BUDGET REACHED",
     "",
     spentLine(input),
-    "You were asked whether to keep going and the answer was yes, so you continue as you are.",
+    "Going further was allowed, so you continue as you are.",
     "",
     ...ADVICE,
   ].join("\n")
@@ -57,16 +60,24 @@ export const EXHAUSTED_PROMPT = textOnly({
 })
 
 /**
- * What the agent is told when the budget was a checkpoint and the person said no. The run ends here
- * the way the ceiling ends one, except that somebody chose it, so the summary is what they will read
- * to decide what happens next.
+ * What the agent is told when the budget was a checkpoint and going further was refused, by a person
+ * answering or by a rule that answers for them. The run ends here the way the ceiling ends one,
+ * except that it was chosen, so the summary is what whoever chose it will read to decide next.
  */
-export const declined = (input: { spent: number; budget: number; feedback: string | undefined }) =>
+export const declined = (input: {
+  spent: number
+  budget: number
+  feedback: string | undefined
+  /** Whether a person was actually asked. A `deny` rule refuses without putting the question. */
+  asked: boolean
+}) =>
   textOnly({
     heading: "CRITICAL - BUDGET NOT EXTENDED",
     opening: [
       spentLine(input),
-      "You were asked whether to keep going and the answer was no.",
+      input.asked
+        ? "You were asked whether to keep going and the answer was no."
+        : "Going further is not allowed for this agent.",
       // Quoted: their words run straight into the sentence that forbids tools otherwise.
       ...(input.feedback === undefined ? [] : [`What they said: "${input.feedback}"`]),
       "Tools are disabled for the rest of this request.",
