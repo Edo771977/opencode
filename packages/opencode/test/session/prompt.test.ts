@@ -3695,3 +3695,133 @@ backgroundSubagents.instance(
     }),
   30_000,
 )
+
+// Both thresholds are counted per agent in the session the agent runs in, and a subagent runs in one
+// of its own. The PR that added the checkpoint left a subagent end to end uncovered, verified by
+// hand; these cover it. `helper` names its model because the config carries two and only one is
+// priced, and the parent's own turns must stay free so what the subagent spends is all that is read.
+function subagentBudgetCfg(helper: {
+  budget?: number
+  budget_stop?: number
+  permission?: Record<string, "allow" | "ask" | "deny">
+}) {
+  return (url: string) => {
+    const base = budgetCfg({}, "test/test-small", { input: 0, output: 900 })(url)
+    return {
+      ...base,
+      agent: {
+        // The caller carries the same budget as the subagent and spends nothing of its own, so a
+        // threshold that read across the two sessions would degrade it and be seen.
+        build: { prompt: "MARKER-BUILD", model: "test/test-model", budget: 0.05 },
+        helper: { mode: "subagent" as const, prompt: "MARKER-HELPER", model: "test/test-model", ...helper },
+      },
+    }
+  }
+}
+
+/** The requests a level answered, in the order they went out: one marker per agent. */
+const servedTo = (hits: readonly { body: Record<string, unknown> }[], marker: string) =>
+  hits.filter((hit) => JSON.stringify(hit.body).includes(marker))
+
+it.instance(
+  "a subagent past its own budget runs the rest of its own session on the small model",
+  () =>
+    Effect.gen(function* () {
+      // $0.09 for a turn of 100 output tokens, against the subagent's $0.05 budget.
+      const { llm } = yield* useServerConfig(subagentBudgetCfg({ budget: 0.05 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* llm.toolMatch(serving("MARKER-BUILD"), "task", {
+        description: "delegated",
+        prompt: "do the work",
+        subagent_type: "helper",
+      })
+      yield* llm.pushMatch(
+        serving("MARKER-HELPER"),
+        reply().tool("glob", { pattern: "**/*.txt" }).usage({ input: 0, output: 100 }).item(),
+      )
+      yield* llm.textMatch(serving("MARKER-HELPER"), "child done")
+      yield* llm.textMatch(serving("MARKER-BUILD"), "parent done")
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "delegate please" }],
+      })
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const hits = yield* llm.hits
+      const child = servedTo(hits, "MARKER-HELPER")
+      const parent = servedTo(hits, "MARKER-BUILD")
+      expect(child).toHaveLength(2)
+      // The turn that crossed goes out on the model that was in hand; the one after it is cheap.
+      expect(child[0]?.body.model).toBe("test-model")
+      expect(child[1]?.body.model).toBe("test-small")
+      expect(JSON.stringify(child[1]?.body)).toContain("BUDGET REACHED")
+      // Still working, so the cheap turn keeps its tools: a budget degrades, it does not stop.
+      expect(child[1]?.body.tools).toBeDefined()
+      // What the subagent spent is not the parent's: its own session, its own agent, its own count.
+      expect(parent.every((hit) => hit.body.model === "test-model")).toBe(true)
+      expect(parent.some((hit) => JSON.stringify(hit.body).includes("BUDGET REACHED"))).toBe(false)
+    }),
+  30_000,
+)
+
+it.instance(
+  "a checkpoint refused on a subagent ends the subagent, and its caller is told why",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(subagentBudgetCfg({ budget: 0.05, permission: { budget: "deny" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* llm.toolMatch(serving("MARKER-BUILD"), "task", {
+        description: "delegated",
+        prompt: "do the work",
+        subagent_type: "helper",
+      })
+      yield* llm.pushMatch(
+        serving("MARKER-HELPER"),
+        reply().tool("glob", { pattern: "**/*.txt" }).usage({ input: 0, output: 100 }).item(),
+      )
+      yield* llm.textMatch(serving("MARKER-HELPER"), "as far as I got")
+      yield* llm.textMatch(serving("MARKER-BUILD"), "parent done")
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "delegate please" }],
+      })
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const hits = yield* llm.hits
+      const child = servedTo(hits, "MARKER-HELPER")
+      // `deny` asks nobody, so nothing here answers a permission and the run still ends: two turns,
+      // the second the text-only summary the ceiling uses.
+      expect(child).toHaveLength(2)
+      expect(JSON.stringify(child[1]?.body)).toContain("BUDGET NOT EXTENDED")
+      expect(child[1]?.body.tools).toBeUndefined()
+      // An ended subagent is not a failed one: what it wrote before stopping is the caller's answer.
+      const call = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .findLast((part) => part.type === "tool" && part.tool === "task")
+      const output = call?.type === "tool" && call.state.status === "completed" ? call.state.output : ""
+      expect(output).toContain("as far as I got")
+      // And the caller keeps working: the subagent's threshold is not the caller's.
+      expect(servedTo(hits, "MARKER-BUILD").at(-1)?.body.tools).toBeDefined()
+    }),
+  30_000,
+)
