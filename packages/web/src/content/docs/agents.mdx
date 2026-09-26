@@ -335,11 +335,13 @@ Use `budget` to cap what an agent spends, in US dollars, within a session. It do
 
 That is the deliberate default: a run meant to carry a piece of work to the end should not depend on someone noticing that it halted. A budget makes an agent cheaper, not absent.
 
-`budget_stop` is the ceiling, and it does stop: the agent gets one text-only turn to summarize what it did and what is left. It is off unless you set it. It suits a subagent, whose caller reads the partial result and decides what to do next — retry it differently, split the work, or do it itself. On a primary agent it ends the run and waits for you, so set it only if that is what you want.
+`budget_stop` is the ceiling, and it does stop: the agent gets one text-only turn to summarize what it did and what is left. It is off unless you set it. It bounds one request rather than the whole session, so the next message you send starts over with its tools — a ceiling ends a run that will not end on its own without ending the session along with it. It suits a subagent, whose caller reads the partial result and decides what to do next: retry it differently, split the work, or do it itself. On a primary agent it hands that same decision back to you.
 
-Both are counted per agent per session, so switching agents mid-session gives each its own budget, and a subagent's session carries only its own work. An agent with no `budget` is never degraded.
+A request can exceed the ceiling by one turn. It is checked before each turn, so the turn that crosses it runs to the end and the one after it is the summary; and the runtime's own continuations of a long request — an automatic compaction and what it writes to carry the work on — are counted with it rather than starting fresh. Treat the number as the order of magnitude you want to allow, not as a figure to the cent.
 
-Set `budget_stop` above `budget` if you want both to happen. They are independent thresholds, so a ceiling at or below the budget stops the agent at a point it would never have reached cheaply — which is a reasonable thing to ask for, but not usually what someone who set both had in mind.
+Both are counted per agent, so switching agents mid-session gives each its own and a subagent's session carries only its own work. What they count differs: `budget` counts everything the agent has spent in the session, `budget_stop` only what it has spent answering the message in hand. An agent with no `budget` is never degraded.
+
+The two are independent, and because they measure different spans a ceiling below the budget is a reasonable thing to ask for: `"budget": 5` with `"budget_stop": 0.5` runs the agent cheaply once the session has cost five dollars, and cuts off any single request that costs more than fifty cents.
 
 The ceiling's own turn runs on the agent's normal model: it has to say what was done and what is left, which is the wrong place to save a few cents. An agent with [`small`](#small-model) is on the cheap model for that turn too, because it is on the cheap model for every turn.
 

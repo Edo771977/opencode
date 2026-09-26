@@ -1096,7 +1096,7 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          // The budget is counted from the whole session, the model sees only what survives
+          // Both thresholds are counted from the full history, the model sees only what survives
           // compaction. Reading the history once serves both: `filterCompacted` trims to a tail for
           // the context window, so spending it as the record of what was spent would reset an
           // agent's budget every time a long session compacts.
@@ -1179,10 +1179,11 @@ const layer = Layer.effect(
           const maxSteps = agent.steps ?? Infinity
           // A budget changes how the agent works, not whether it does: past the soft threshold the
           // rest of the session runs on the cheap model, and only an explicitly configured ceiling
-          // ends the run. See SessionBudget.
+          // ends the run — the run this request set off, not the session. See SessionBudget.
           const budget = SessionBudget.evaluate({
             messages: history,
             agent: agent.name,
+            request: lastUser.id,
             budget: agent.budget,
             stop: agent.budgetStop,
           })

@@ -2499,6 +2499,8 @@ noLLMServer.instance(
 function budgetCfg(
   agent: { small?: boolean; steps?: number; budget?: number; budget_stop?: number },
   smallModel = "test/test-small",
+  cost = { input: 0, output: 0 },
+  limit = { context: 100000, output: 10000 },
 ) {
   return (url: string) => {
     const base = providerCfg(url)
@@ -2510,6 +2512,8 @@ function budgetCfg(
           ...base.provider.test,
           models: {
             ...base.provider.test.models,
+            // Free by default, so the tests that seed a spend see only what they seeded.
+            "test-model": { ...base.provider.test.models["test-model"], cost, limit },
             "test-small": {
               ...base.provider.test.models["test-model"],
               id: "test-small",
@@ -2532,6 +2536,29 @@ const spend = Effect.fn("test.spend")(function* (sessionID: SessionID, cost: num
   const seeded = yield* seed(sessionID, { finish: "stop" })
   yield* sessions.updateMessage({ ...seeded.assistant, cost })
   return seeded
+})
+
+// `spend` charges a request that is already answered; this charges the one the loop is about to
+// answer, which is where a request sits once a step of its own has gone past the ceiling.
+const charge = Effect.fn("test.charge")(function* (sessionID: SessionID, parentID: MessageID, cost: number) {
+  const sessions = yield* Session.Service
+  const assistant: SessionV1.Assistant = {
+    id: MessageID.ascending(),
+    role: "assistant",
+    parentID,
+    sessionID,
+    mode: "build",
+    agent: "build",
+    cost,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    time: { created: Date.now() },
+    finish: "tool-calls",
+  }
+  yield* sessions.updateMessage(assistant)
+  return assistant
 })
 
 it.instance("loop degrades a spent agent to the small model and tells it once", () =>
@@ -2564,31 +2591,116 @@ it.instance("loop degrades a spent agent to the small model and tells it once", 
 
 it.instance("loop withholds tools on the turn that reaches the ceiling", () =>
   Effect.gen(function* () {
-    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, budget_stop: 0.9 }))
+    // $0.09 for a turn of 100 output tokens, against a $0.05 ceiling: the request reaches the
+    // ceiling by paying for a step of its own, which is the only way a request can reach it.
+    const { llm } = yield* useServerConfig(
+      budgetCfg({ budget: 0.5, budget_stop: 0.05 }, "test/test-small", { input: 0, output: 900 }),
+    )
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
     const chat = yield* sessions.create({
       title: "Pinned",
       permission: [{ permission: "*", pattern: "*", action: "allow" }],
     })
-    yield* spend(chat.id, 1)
     yield* prompt.prompt({
       sessionID: chat.id,
       agent: "build",
+      // Named, not resolved: the config carries two models and only this one is priced.
+      model: ref,
       noReply: true,
-      parts: [{ type: "text", text: "carry on" }],
+      parts: [{ type: "text", text: "find text files" }],
     })
+    yield* llm.push(reply().tool("glob", { pattern: "**/*.txt" }).usage({ input: 0, output: 100 }))
     yield* llm.text("summary")
 
     yield* prompt.loop({ sessionID: chat.id })
     const hits = yield* llm.hits
-    expect(hits).toHaveLength(1)
-    expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET EXHAUSTED")
+    expect(hits).toHaveLength(2)
+    // The first step is ordinary work: a request is not over its ceiling before it has spent.
+    expect(hits[0]?.body.tools).toBeDefined()
+    expect(JSON.stringify(hits[0]?.body)).not.toContain("BUDGET EXHAUSTED")
+    expect(JSON.stringify(hits[1]?.body)).toContain("BUDGET EXHAUSTED")
     // The ceiling's prompt claims tools are disabled; nothing is sent for the model to call.
-    expect(hits[0]?.body.tools).toBeUndefined()
+    expect(hits[1]?.body.tools).toBeUndefined()
     // A stopped agent is not degraded: there is no next turn to make cheaper.
-    expect(hits[0]?.body.model).toBe("test-model")
+    expect(hits[1]?.body.model).toBe("test-model")
   }),
+)
+
+it.instance("loop gives a new request its tools back after an earlier one reached the ceiling", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget_stop: 0.9 }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    // An earlier request went well past the ceiling and was cut off there.
+    yield* spend(chat.id, 1)
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "carry on" }],
+    })
+    yield* llm.text("done")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    const hits = yield* llm.hits
+    expect(hits).toHaveLength(1)
+    // What the ceiling's own prompt promises: tools come back with the next user input. Counted
+    // over the session instead, spend never goes down, and the session could never work again.
+    expect(hits[0]?.body.tools).toBeDefined()
+    expect(JSON.stringify(hits[0]?.body)).not.toContain("BUDGET EXHAUSTED")
+  }),
+)
+
+it.instance(
+  "loop holds the ceiling across an automatic compaction of the same request",
+  () =>
+    Effect.gen(function* () {
+      // One turn of 100 output tokens costs $0.09 against a $0.05 ceiling, and its 1600 input tokens
+      // overflow a 2000-token window, so the loop compacts and the compaction writes the user
+      // message that tells the agent to continue. That message is the runtime talking to itself: if
+      // it counted as a request of its own, the run would get a fresh allowance every time it
+      // compacted, which is every time it needed to keep going.
+      const { llm } = yield* useServerConfig(
+        budgetCfg({ budget_stop: 0.05 }, "test/test-small", { input: 0, output: 900 }, { context: 2000, output: 500 }),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      // Enough overflowing turns queued that the run would keep buying itself another ceiling.
+      for (const index of [0, 1, 2, 3]) {
+        yield* llm.push(
+          reply()
+            .tool("glob", { pattern: `**/*.t${index}` })
+            .usage({ input: 1600, output: 100 }),
+        )
+        yield* llm.text(`compacted ${index}`)
+      }
+      yield* llm.text("summary")
+
+      yield* prompt.loop({ sessionID: chat.id })
+      const hits = yield* llm.hits
+      // Only the first turn was under the ceiling. Every request after it went out without tools,
+      // the compaction's own included, and one of them carried the ceiling's prompt.
+      expect(hits.filter((hit) => Array.isArray(hit.body.tools)).length).toBe(1)
+      expect(hits.some((hit) => JSON.stringify(hit.body).includes("BUDGET EXHAUSTED"))).toBe(true)
+    }),
+  60_000,
 )
 
 it.instance("loop runs an agent configured small on the small model", () =>
@@ -2628,9 +2740,7 @@ it.instance(
         title: "Pinned",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
-      yield* spend(chat.id, 1)
-      yield* llm.hang
-      yield* prompt.prompt({
+      const pending = yield* prompt.prompt({
         sessionID: chat.id,
         agent: "build",
         noReply: true,
@@ -2641,6 +2751,8 @@ it.instance(
           retryCount: 0,
         }),
       })
+      yield* charge(chat.id, pending.info.id, 1)
+      yield* llm.hang
 
       const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* awaitWithTimeout(llm.wait(1), "timed out waiting for the structured request", "10 seconds")
