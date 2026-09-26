@@ -67,7 +67,8 @@ export const declined = (input: { spent: number; budget: number; feedback: strin
     opening: [
       spentLine(input),
       "You were asked whether to keep going and the answer was no.",
-      ...(input.feedback === undefined ? [] : [`What they said: ${input.feedback}`]),
+      // Quoted: their words run straight into the sentence that forbids tools otherwise.
+      ...(input.feedback === undefined ? [] : [`What they said: "${input.feedback}"`]),
       "Tools are disabled for the rest of this request.",
     ].join(" "),
     statement: "Statement that the budget was reached and not extended",

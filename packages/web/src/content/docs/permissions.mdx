@@ -162,7 +162,7 @@ OpenCode permissions are keyed by tool name, plus a couple of safety guards:
 - `websearch` — web search (matches the query)
 - `external_directory` — triggered when a tool touches paths outside the project working directory
 - `doom_loop` — triggered when the same tool call repeats 3 times with identical input
-- `budget` — triggered when an agent's spend crosses its [`budget`](/docs/agents#budget); `"allow"` lets it carry on cheaply, `"ask"` stops to ask you, `"deny"` ends the run there
+- `budget` — triggered while an agent is past its [`budget`](/docs/agents#budget); `"allow"` lets it carry on cheaply, `"ask"` asks you once per request, `"deny"` ends every request that goes past it. Unlike the others, only a rule naming `budget` applies: a catch-all is about tools, and reading it as a spending checkpoint would end runs nobody configured one for
 
 ---
 

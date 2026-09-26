@@ -362,7 +362,11 @@ Degrading suits a run nobody is watching. While you are working, being handed a 
 
 Now crossing the budget stops to ask you, showing what has been spent against what was allowed. Say yes and the agent carries on with the model and the tools it had — degrading a run you just agreed to pay for would answer a question you did not ask. Say no and the run ends the way the ceiling ends one: one turn, no tools, a summary of what was done and what is left, and whatever you typed as a reason is passed on to it so the summary answers it.
 
-Each yes buys another budget's worth, so you are asked again at `$4`, `$6`, and so on rather than once for the whole session — unless you answer _Always_, which allows it for the rest of the session like any other permission. `"deny"` ends the run at the crossing without asking anybody, which is what you want on an agent that should never quietly cost more than its budget.
+You are asked once per message. The answer covers the rest of that request and the next message asks again, so what you agree to is bounded by the request in front of you rather than by the session; answer _Always_ and it stops asking until you restart, like any other permission. If a single authorized request also needs a bound it cannot pass, that is what `budget_stop` is for.
+
+`"deny"` never lets the agent work past the budget: every request that starts over it ends there, which is what you want on an agent that should never quietly cost more than its number.
+
+Only a rule that names `budget` counts. A catch-all in your ruleset is about tools — several built-in agents deny everything by default — so it does not turn a budget into a checkpoint.
 
 :::caution
 `opencode run` is not interactive, and it answers permission questions for you: without `--auto` it rejects them, so `"ask"` ends the run at the budget exactly as `"deny"` would, and with `--auto` or `--yolo` it approves them, so the agent keeps working past the budget. Neither of them waits. If an unattended run needs a bound it cannot pass, give it a `budget_stop` as well.
