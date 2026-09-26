@@ -82,8 +82,14 @@ jobs:
         working-directory: packages/client
         run: bun run check:generated
 
+      # Twice this step has stalled in the exerciser's `effect` mode with no output and no
+      # end, and with no ceiling of its own it inherited the job default of six hours: one
+      # run burned a runner overnight, another parked a PR until somebody cancelled it. The
+      # three modes together take about 2m30s when they work, so a stall now fails with a
+      # log instead of holding the job. What it waits on is still open (#22).
       - name: Run HttpApi exerciser gates
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         working-directory: packages/opencode
         run: bun run test:httpapi
 
