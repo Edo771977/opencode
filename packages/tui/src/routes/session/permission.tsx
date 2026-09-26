@@ -369,6 +369,30 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               }
             }
 
+            if (permission === "budget") {
+              const meta = props.request.metadata ?? {}
+              const dollars = (value: unknown) =>
+                typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(2)}` : undefined
+              const spent = dollars(meta["spent"])
+              const budget = dollars(meta["budget"])
+              return {
+                icon: "$",
+                title: budget === undefined ? "Keep working past the budget" : `Keep working past the ${budget} budget`,
+                body: (
+                  <box paddingLeft={1}>
+                    <text fg={theme.textMuted}>
+                      {spent === undefined || budget === undefined
+                        ? "This agent has reached the budget set for it in this session."
+                        : `This agent has spent ${spent} of its ${budget} budget for this session.`}
+                    </text>
+                    <text fg={theme.textMuted}>
+                      Rejecting it ends the run with a summary of what was done and what is left.
+                    </text>
+                  </box>
+                ),
+              }
+            }
+
             return {
               icon: "⚙",
               title: `Call tool ${permission}`,

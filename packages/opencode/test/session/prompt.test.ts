@@ -2497,7 +2497,13 @@ noLLMServer.instance(
 // reviews raised against the first budget commit was a step threaded through the wrong model or
 // the wrong tool set, which only a run of the whole loop can catch.
 function budgetCfg(
-  agent: { small?: boolean; steps?: number; budget?: number; budget_stop?: number },
+  agent: {
+    small?: boolean
+    steps?: number
+    budget?: number
+    budget_stop?: number
+    permission?: Record<string, "allow" | "ask" | "deny">
+  },
   smallModel = "test/test-small",
   cost = { input: 0, output: 0 },
   limit = { context: 100000, output: 10000 },
@@ -2531,10 +2537,37 @@ function budgetCfg(
   }
 }
 
-const spend = Effect.fn("test.spend")(function* (sessionID: SessionID, cost: number) {
+// The loop blocks on a checkpoint, so a test answers it from outside the forked run.
+const waitForPermission = (name: string) =>
+  pollWithTimeout(
+    Effect.gen(function* () {
+      const permissions = yield* Permission.Service
+      return (yield* permissions.list()).find((item) => item.permission === name)
+    }),
+    `no ${name} permission was requested`,
+    "10 seconds",
+  )
+
+const answer = Effect.fn("test.answer")(function* (
+  name: string,
+  reply: "once" | "always" | "reject",
+  message?: string,
+) {
+  const request = yield* waitForPermission(name)
+  const permissions = yield* Permission.Service
+  yield* permissions.reply({ requestID: request.id, reply, message })
+  return request
+})
+
+const spend = Effect.fn("test.spend")(function* (sessionID: SessionID, cost: number, input?: number) {
   const sessions = yield* Session.Service
   const seeded = yield* seed(sessionID, { finish: "stop" })
-  yield* sessions.updateMessage({ ...seeded.assistant, cost })
+  yield* sessions.updateMessage({
+    ...seeded.assistant,
+    cost,
+    // Input tokens only matter to the tests that need the next step to overflow the window.
+    ...(input === undefined ? {} : { tokens: { ...seeded.assistant.tokens, input } }),
+  })
   return seeded
 })
 
@@ -2587,6 +2620,528 @@ it.instance("loop degrades a spent agent to the small model and tells it once", 
     // Degrading is not stopping: the agent keeps working, so it keeps its tools.
     expect(hits[0]?.body.tools).toBeDefined()
   }),
+)
+
+it.instance(
+  "loop asks whether to keep working when the budget is a checkpoint, and keeps the model on yes",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const request = yield* answer("budget", "once")
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop never finished after the checkpoint", "15 seconds")
+
+      // The question carries what was spent against what was allowed, which is the whole point of
+      // being asked rather than told.
+      expect(request.metadata).toMatchObject({ spent: 1, budget: 0.5 })
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      // Authorized, so nothing is taken away: the session model and the tools it had. Degrading a run
+      // somebody just agreed to pay for is the behaviour this permission exists to replace.
+      expect(hits[0]?.body.model).toBe("test-model")
+      expect(hits[0]?.body.tools).toBeDefined()
+      expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET REACHED")
+      expect(JSON.stringify(hits[0]?.body)).not.toContain("cheaper and less capable")
+    }),
+  20_000,
+)
+
+it.instance(
+  "loop ends the run with a summary when the checkpoint is refused, and passes on what was said",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("summary")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "reject", "that is enough for today")
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop never finished after the refusal", "15 seconds")
+
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      const body = JSON.stringify(hits[0]?.body)
+      expect(body).toContain("BUDGET NOT EXTENDED")
+      // The reason travels with the refusal: a summary written without it would guess at why it stopped.
+      expect(body).toContain("that is enough for today")
+      // Told it may not call tools, and none are sent, so the sentence is true.
+      expect(hits[0]?.body.tools).toBeUndefined()
+      // The turn that has to report what was done is not the turn to save a few cents on.
+      expect(hits[0]?.body.model).toBe("test-model")
+    }),
+  20_000,
+)
+
+it.instance(
+  "loop leaves the budget alone when only a catch-all denies, and degrades as before",
+  () =>
+    Effect.gen(function* () {
+      // `explore`, `compaction`, `title` and `summary` all deny everything by default. A catch-all is
+      // about tools; read as a budget checkpoint it would end runs on agents nobody configured one for.
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { "*": "deny" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const permissions = yield* Permission.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("done")
+
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(yield* permissions.list()).toHaveLength(0)
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      // Degraded, which is what a budget does when nothing says otherwise.
+      expect(hits[0]?.body.model).toBe("test-small")
+      expect(JSON.stringify(hits[0]?.body)).not.toContain("NOT EXTENDED")
+    }),
+  30_000,
+)
+
+it.instance("loop denies a budget on every request past it, not only at the crossing", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { budget: "deny" } }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    // The crossing is already behind us, which is the state a denied agent spends its life in.
+    yield* spend(chat.id, 1)
+    for (const text of ["carry on", "and again"]) {
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text }],
+      })
+      yield* llm.text("summary")
+      yield* prompt.loop({ sessionID: chat.id })
+    }
+
+    const hits = yield* llm.hits
+    expect(hits).toHaveLength(2)
+    // Read as the step that crosses rather than as being past it, the second request would run with
+    // the full model and every tool — leaving `deny` more permissive than the default it replaces.
+    for (const hit of hits) {
+      expect(JSON.stringify(hit.body)).toContain("BUDGET NOT EXTENDED")
+      expect(hit.body.tools).toBeUndefined()
+    }
+  }),
+)
+
+it.instance(
+  "loop lets the ceiling end the run without asking about the budget",
+  () =>
+    Effect.gen(function* () {
+      // Both thresholds land on the same step. Asking there puts a question that a yes cannot
+      // answer — the step ends the run either way — and waits for somebody on a run configured to
+      // stop by itself.
+      const { llm } = yield* useServerConfig(
+        budgetCfg({ budget: 0.5, budget_stop: 0.9, permission: { budget: "ask" } }),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const permissions = yield* Permission.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const pending = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      // Charged to this request, so the ceiling and the budget are both behind us on the same step.
+      yield* charge(chat.id, pending.info.id, 1)
+      yield* llm.text("summary")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop stopped to ask on a step the ceiling ends", "15 seconds")
+      expect(yield* permissions.list()).toHaveLength(0)
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET EXHAUSTED")
+      expect(JSON.stringify(hits[0]?.body)).not.toContain("NOT EXTENDED")
+      expect(hits[0]?.body.tools).toBeUndefined()
+    }),
+  20_000,
+)
+
+it.instance(
+  "loop asks once per request rather than before every step",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      yield* llm.push(reply().tool("glob", { pattern: "**/*.txt" }))
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      // Only one answer is ever given, so a second question would hang this test.
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop asked again inside the same request", "20 seconds")
+
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(2)
+      // The answer covers the whole request: both steps keep their tools and the session model.
+      for (const hit of hits) {
+        expect(hit.body.tools).toBeDefined()
+        expect(hit.body.model).toBe("test-model")
+      }
+    }),
+  30_000,
+)
+
+it.instance(
+  "loop asks again for a message steered in while it is still working",
+  () =>
+    Effect.gen(function* () {
+      // Steering is how the TUI is used: a message typed while the agent is working joins the drain
+      // already running rather than starting one. Held as a flag on that drain, one answer covered
+      // every later message a person typed — full model, every tool, no question asked.
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      // The first answer is held open, which is the window a person types into.
+      const gate = defer<void>()
+      yield* llm.hold("first", gate.promise)
+      yield* llm.text("second")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "and this too" }],
+      })
+      gate.resolve()
+      // The steered message is its own request, so it is asked in its own right. If it inherited the
+      // answer given for the message before it, nothing would be pending and this would time out.
+      yield* answer("budget", "once")
+      yield* awaitWithTimeout(Fiber.join(fiber), "the steered message was never asked about", "20 seconds")
+
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(2)
+      for (const hit of hits) expect(JSON.stringify(hit.body)).toContain("BUDGET REACHED")
+    }),
+  40_000,
+)
+
+it.instance(
+  "loop denies a budget on a step the step limit already ends",
+  () =>
+    Effect.gen(function* () {
+      // With `steps: 1` the first step is the last one. The checkpoint reads whether it fires rather
+      // than how it is configured, so this step neither asked nor degraded: `deny` ran at full price
+      // and refused nothing, which is worse than the `allow` it replaces.
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, steps: 1, permission: { budget: "deny" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("summary")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop stopped to ask instead of refusing", "15 seconds")
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET NOT EXTENDED")
+      expect(hits[0]?.body.tools).toBeUndefined()
+    }),
+  30_000,
+)
+
+it.instance(
+  "loop degrades rather than asking on a step the step limit already ends",
+  () =>
+    Effect.gen(function* () {
+      // The other half of not asking a question a yes cannot change: `ask` stays silent here, and
+      // since nothing is going to be authorized the agent falls back to the cheap model it would have
+      // had all along. Nobody is asked and nothing is left at full price.
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, steps: 1, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const permissions = yield* Permission.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("summary")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop stopped to ask on a step the step limit ends", "15 seconds")
+      expect(yield* permissions.list()).toHaveLength(0)
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      expect(hits[0]?.body.model).toBe("test-small")
+      expect(JSON.stringify(hits[0]?.body)).toContain("MAXIMUM STEPS REACHED")
+    }),
+  30_000,
+)
+
+it.instance(
+  "loop keeps an authorized request off the cheap model on the step its step limit ends",
+  () =>
+    Effect.gen(function* () {
+      // The step limit closes the request with a text-only turn, and that turn has to say what was
+      // done and what is left. Degrading was read from whether the checkpoint could fire on the step
+      // rather than from whether this request had been authorized, so the closing summary of a run
+      // somebody had just paid full price for was quietly written by the cheap model.
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, steps: 2, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      yield* llm.push(reply().tool("glob", { pattern: "**/*.txt" }))
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop never finished after the checkpoint", "20 seconds")
+
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(2)
+      // Step two is the step limit's own turn: no tools, and still the model the person paid for.
+      expect(hits[1]?.body.tools).toBeUndefined()
+      expect(JSON.stringify(hits[1]?.body)).toContain("MAXIMUM STEPS REACHED")
+      for (const hit of hits) expect(hit.body.model).toBe("test-model")
+    }),
+  40_000,
+)
+
+it.instance(
+  "loop does not ask again when the request it authorized compacts afterwards",
+  () =>
+    Effect.gen(function* () {
+      // The authorization is held against a message id, and an automatic compaction writes a user
+      // message of its own, so the request the person authorized carries on under a different newest
+      // message. Asking again there is the same double question the compaction ordering fixed.
+      const { llm } = yield* useServerConfig(
+        budgetCfg(
+          { budget: 0.5, permission: { budget: "ask" } },
+          "test/test-small",
+          { input: 0, output: 900 },
+          {
+            context: 2000,
+            output: 500,
+          },
+        ),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      // Authorized, then a turn that overflows the window, so the next step compacts.
+      yield* llm.push(reply().tool("glob", { pattern: "**/*.txt" }).usage({ input: 1600, output: 10 }))
+      yield* llm.text("compacted")
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      // Only one answer is given, so a second question hangs this test.
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop asked again after compacting the same request", "20 seconds")
+    }),
+  40_000,
+)
+
+it.instance(
+  "loop asks once when the checkpoint falls on a step that compacts first",
+  () =>
+    Effect.gen(function* () {
+      // The turn before this one crossed the budget and filled the window, so the step has both a
+      // compaction and a checkpoint to deal with. Asked before compacting, the question would be put
+      // again on the step after it — spend does not move while the loop compacts — and the first
+      // answer thrown away. This test hangs and fails on its own if that happens, because only one
+      // answer is ever given.
+      const { llm } = yield* useServerConfig(
+        budgetCfg(
+          { budget: 0.5, permission: { budget: "ask" } },
+          "test/test-small",
+          { input: 0, output: 900 },
+          {
+            context: 2000,
+            output: 500,
+          },
+        ),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const permissions = yield* Permission.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1, 1900)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("compacted")
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop never finished, so it asked more than once", "20 seconds")
+
+      expect(yield* permissions.list()).toHaveLength(0)
+      const hits = yield* llm.hits
+      // The compaction's own request, then the authorized step with its tools back.
+      expect(hits).toHaveLength(2)
+      expect(hits[1]?.body.tools).toBeDefined()
+      expect(JSON.stringify(hits[1]?.body)).toContain("BUDGET REACHED")
+    }),
+  30_000,
+)
+
+it.instance(
+  "loop ends a denied budget at the crossing without asking anybody",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, permission: { budget: "deny" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const permissions = yield* Permission.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "carry on" }],
+      })
+      yield* llm.text("summary")
+
+      // Forked so a regression that stops to ask fails with that sentence rather than with a bare
+      // timeout: the question would never be answered and the loop would simply never return.
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(
+        Fiber.join(fiber),
+        "the loop stopped to ask on a ruleset that already says no",
+        "15 seconds",
+      )
+      // Nobody was asked: a ruleset that already says no has no question to put to anyone.
+      expect(yield* permissions.list()).toHaveLength(0)
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(1)
+      expect(JSON.stringify(hits[0]?.body)).toContain("BUDGET NOT EXTENDED")
+      expect(hits[0]?.body.tools).toBeUndefined()
+    }),
+  30_000,
 )
 
 it.instance("loop withholds tools on the turn that reaches the ceiling", () =>

@@ -124,6 +124,23 @@ describe("run permission shared", () => {
       title: "Continue after repeated failures",
     })
 
+    expect(permissionInfo(req({ permission: "budget", metadata: { spent: 1.5, budget: 1 } }))).toMatchObject({
+      title: "Keep working past the $1.00 budget",
+      lines: [
+        "This agent has spent $1.50 of its $1.00 budget for this session.",
+        "Rejecting it ends the run with a summary of what was done and what is left.",
+      ],
+    })
+
+    // The amounts come from the runtime, so the question still reads if they ever do not arrive.
+    expect(permissionInfo(req({ permission: "budget" }))).toMatchObject({
+      title: "Keep working past the budget",
+      lines: [
+        "This agent has reached the budget set for it in this session.",
+        "Rejecting it ends the run with a summary of what was done and what is left.",
+      ],
+    })
+
     expect(permissionInfo(req({ permission: "custom_tool" }))).toMatchObject({
       title: "Call tool custom_tool",
       lines: ["Tool: custom_tool"],

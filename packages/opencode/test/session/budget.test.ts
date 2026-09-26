@@ -169,6 +169,34 @@ describe("SessionBudget.evaluate", () => {
     ).toMatchObject({ spentOnRequest: 5.1, stop: true })
   })
 
+  test("the request begins at its own message, not at whichever is newest", () => {
+    // What anything meaning "this request" has to be keyed on: the loop's own messages move the
+    // newest one while a request runs, and a checkpoint keyed on that asks a second time.
+    const human = user("msg_human")
+    const queued = compaction(true, "msg_compaction")
+    const carried = user("msg_continue")
+    expect(
+      SessionBudget.evaluate({
+        messages: [human, turn("build", 5, "msg_human"), queued, carried],
+        agent: "build",
+        request: "msg_continue",
+        budget: undefined,
+        stop: undefined,
+      }),
+    ).toMatchObject({ requestOrigin: "msg_human" })
+
+    // A message of the person's own begins its own request.
+    expect(
+      SessionBudget.evaluate({
+        messages: [user("msg_first"), turn("build", 1, "msg_first"), user("msg_second")],
+        agent: "build",
+        request: "msg_second",
+        budget: undefined,
+        stop: undefined,
+      }),
+    ).toMatchObject({ requestOrigin: "msg_second" })
+  })
+
   test("a manual compaction ends the chain", () => {
     // It queues its own message but writes no continuation, so what follows is the person's ask.
     const human = user("msg_human")
