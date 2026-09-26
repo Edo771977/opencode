@@ -2968,6 +2968,46 @@ it.instance(
 )
 
 it.instance(
+  "loop keeps an authorized request off the cheap model on the step its step limit ends",
+  () =>
+    Effect.gen(function* () {
+      // The step limit closes the request with a text-only turn, and that turn has to say what was
+      // done and what is left. Degrading was read from whether the checkpoint could fire on the step
+      // rather than from whether this request had been authorized, so the closing summary of a run
+      // somebody had just paid full price for was quietly written by the cheap model.
+      const { llm } = yield* useServerConfig(budgetCfg({ budget: 0.5, steps: 2, permission: { budget: "ask" } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      yield* llm.push(reply().tool("glob", { pattern: "**/*.txt" }))
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop never finished after the checkpoint", "20 seconds")
+
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(2)
+      // Step two is the step limit's own turn: no tools, and still the model the person paid for.
+      expect(hits[1]?.body.tools).toBeUndefined()
+      expect(JSON.stringify(hits[1]?.body)).toContain("MAXIMUM STEPS REACHED")
+      for (const hit of hits) expect(hit.body.model).toBe("test-model")
+    }),
+  40_000,
+)
+
+it.instance(
   "loop does not ask again when the request it authorized compacts afterwards",
   () =>
     Effect.gen(function* () {

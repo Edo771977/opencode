@@ -99,9 +99,13 @@ const compactionPart = (message: SessionV1.WithParts) =>
  *
  * A manual compaction ends the chain. It queues its own message but writes no continuation, so the
  * message after it is the person's and starts a request of its own. The one case this reads wrongly
- * is an automatic compaction whose continuation a plugin suppressed: the person's next message then
- * sits where the continuation would have, and is counted with what came before. It costs that one
- * message its tools rather than the session, which is the safer way to be wrong here.
+ * is an automatic compaction whose continuation a plugin suppressed through
+ * `experimental.compaction.autocontinue`: the person's next message then sits where the continuation
+ * would have and is counted with what came before. That costs it its own ceiling allowance, and —
+ * since the head of this chain is also what decides whether a budget checkpoint has been answered —
+ * its own question. Telling the two apart needs a marker the runtime does not write: the continuation
+ * carries only synthetic parts, but the replay an overflow writes copies the person's own, and that
+ * one has to stay in the chain. Narrowing on synthetic parts would close this by opening that.
  */
 function requestChain(messages: readonly SessionV1.WithParts[], request: string) {
   const users = messages.filter((message) => message.info.role === "user").sort(oldestFirst)

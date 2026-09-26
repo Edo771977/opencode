@@ -1207,6 +1207,8 @@ const layer = Layer.effect(
             limit === undefined
               ? "allow"
               : (agent.permission.findLast((rule) => rule.permission === "budget")?.action ?? "allow")
+          // Already answered for the request being answered: one answer covers the rest of it.
+          const authorized = authorizedRequest === budget.requestOrigin
           // Whether the checkpoint is live on this step: past the budget, configured to stop, and not
           // on a step that already ends the run, because a question whose yes changes nothing only
           // makes a run configured to stop wait for somebody. `deny` asks nobody, so the step limit
@@ -1217,15 +1219,17 @@ const layer = Layer.effect(
             !budget.stop &&
             (checkpointAction === "deny" || step < maxSteps)
           // An agent configured `small` is on the cheap model for every turn, the summary turn at a
-          // ceiling included. A degraded one is not: that last turn is text-only and has to say what
-          // was done and what is left, which is the wrong place to save a few cents. Nor is one whose
-          // checkpoint fires: degrading a run somebody just authorized answers a question nobody
-          // asked, and the turn that reports a refusal is that same summary turn.
+          // ceiling included. Past the budget every other agent degrades, unless a checkpoint is
+          // about to speak for this step or somebody has already authorized this request: degrading a
+          // run just paid for answers a question nobody asked, and the turn that reports a refusal is
+          // the summary turn, which is the wrong place to save a few cents.
           //
-          // Read from the configuration instead of from whether the checkpoint fires, a step it
-          // cannot fire on lost both — no question and no cheap model — which left `deny` costing
-          // more than the `allow` it replaces.
-          const wantsSmall = agent.small === true || (budget.degrade && !budget.stop && !checkpointing)
+          // Both halves were got wrong once. Read from how the checkpoint is configured rather than
+          // from whether it fires, a step it cannot fire on lost the question and the cheap model
+          // both, leaving `deny` dearer than the `allow` it replaces. Read without `authorized`, an
+          // authorized request whose last step was the step limit had that closing summary quietly
+          // moved to the cheap model.
+          const wantsSmall = agent.small === true || (budget.degrade && !budget.stop && !checkpointing && !authorized)
           const candidate = wantsSmall ? yield* provider.getSmallModel(model.providerID) : undefined
           // The same guards the V2 resolver applies: an agent turn carries tool definitions, so a
           // model that cannot call them is no substitute however cheap, and a "small" model that is
@@ -1266,7 +1270,7 @@ const layer = Layer.effect(
           //
           // One answer covers the request it was given for, not the drain: what bounds a single
           // request that runs away after a yes is `budget_stop`.
-          const asking = checkpointing && authorizedRequest !== budget.requestOrigin
+          const asking = checkpointing && !authorized
           // A refusal ends the run the way the ceiling does, and carries what the person said with it.
           const declined =
             asking && limit !== undefined
