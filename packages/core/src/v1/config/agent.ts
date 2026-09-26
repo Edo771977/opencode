@@ -44,7 +44,7 @@ const AgentSchema = Schema.StructWithRest(
     }),
     budget_stop: Schema.optional(Schema.Finite.check(Schema.isGreaterThan(0))).annotate({
       description:
-        "US dollars after which this agent stops with a text-only summary. Off by default; suited to subagents, whose caller can react to a partial result",
+        "US dollars a single request may cost this agent before it stops with a text-only summary; the next user message starts over. Off by default; suited to subagents, whose caller can react to a partial result",
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
     permission: Schema.optional(ConfigPermissionV1.Info),

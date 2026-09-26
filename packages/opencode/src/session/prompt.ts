@@ -1179,10 +1179,11 @@ const layer = Layer.effect(
           const maxSteps = agent.steps ?? Infinity
           // A budget changes how the agent works, not whether it does: past the soft threshold the
           // rest of the session runs on the cheap model, and only an explicitly configured ceiling
-          // ends the run. See SessionBudget.
+          // ends the run — the run this request set off, not the session. See SessionBudget.
           const budget = SessionBudget.evaluate({
             messages: history,
             agent: agent.name,
+            request: lastUser.id,
             budget: agent.budget,
             stop: agent.budgetStop,
           })
