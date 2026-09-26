@@ -213,6 +213,57 @@ describe("SessionBudget.evaluate", () => {
     ).toMatchObject({ spentOnRequest: 0, stop: false })
   })
 
+  test("a message with nothing the person wrote in it continues the request", () => {
+    // How a background subagent's result reaches its caller, and how a command run as a subtask tells
+    // the agent to carry on: a user message holding only what the runtime wrote for it to read.
+    // Counted as a request of its own, an agent that has delegated buys another ceiling every time
+    // something it started comes back, with nobody present.
+    const human = user("msg_human")
+    const delivered = user("msg_delivered", [{ type: "text", synthetic: true, text: "Background task completed" }])
+    expect(
+      SessionBudget.evaluate({
+        messages: [human, turn("build", 5, "msg_human"), delivered, turn("build", 0.1, "msg_delivered")],
+        agent: "build",
+        request: "msg_delivered",
+        budget: undefined,
+        stop: 1,
+      }),
+    ).toMatchObject({ spentOnRequest: 5.1, stop: true, requestOrigin: "msg_human" })
+  })
+
+  test("a message the person wrote begins its own request, whatever the runtime added to it", () => {
+    // Reminders are pushed onto the person's message rather than written as one of their own, so a
+    // request is told from a continuation by what the person put in it, not by what is beside it.
+    const reminded = user("msg_second", [
+      { type: "text", text: "and now this" },
+      { type: "text", synthetic: true, text: "<system-reminder>" },
+    ])
+    expect(
+      SessionBudget.evaluate({
+        messages: [user("msg_first"), turn("build", 5, "msg_first"), reminded],
+        agent: "build",
+        request: "msg_second",
+        budget: undefined,
+        stop: 1,
+      }),
+    ).toMatchObject({ spentOnRequest: 0, stop: false, requestOrigin: "msg_second" })
+  })
+
+  test("a request read before its parts were written is still the person's", () => {
+    // Parts are written after the message they belong to. Read in that window a request has none, and
+    // an empty message must not be taken for one the runtime wrote: that would cost a person's ask
+    // its own allowance on a race.
+    expect(
+      SessionBudget.evaluate({
+        messages: [user("msg_first"), turn("build", 5, "msg_first"), user("msg_second")],
+        agent: "build",
+        request: "msg_second",
+        budget: undefined,
+        stop: 1,
+      }),
+    ).toMatchObject({ spentOnRequest: 0, stop: false, requestOrigin: "msg_second" })
+  })
+
   test("another agent's turns on the same request are not counted", () => {
     expect(
       SessionBudget.evaluate({
