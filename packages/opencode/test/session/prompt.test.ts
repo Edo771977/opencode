@@ -3825,3 +3825,77 @@ it.instance(
     }),
   30_000,
 )
+
+// A background subagent's result is delivered as a user message in the caller's session. The caller
+// had already been stopped by its ceiling here, so what this asserts is that the delivery does not
+// hand it a fresh allowance: an agent that has delegated would otherwise outspend any ceiling by
+// having something come back, with nobody present to notice.
+function backgroundCeilingCfg(url: string) {
+  const base = budgetCfg({}, "test/test-small", { input: 0, output: 900 })(url)
+  return {
+    ...base,
+    agent: {
+      build: { prompt: "MARKER-BUILD", model: "test/test-model", budget_stop: 0.05 },
+      helper: { mode: "subagent" as const, prompt: "MARKER-HELPER", model: "test/test-model" },
+    },
+  }
+}
+
+backgroundSubagents.instance(
+  "a background subagent's result does not hand its caller a fresh ceiling allowance",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(backgroundCeilingCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const background = yield* BackgroundJob.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      // $0.09 for the turn that detaches the task, against a $0.05 ceiling.
+      yield* llm.pushMatch(
+        serving("MARKER-BUILD"),
+        reply()
+          .tool("task", {
+            description: "detached",
+            prompt: "long running work",
+            subagent_type: "helper",
+            background: true,
+          })
+          .usage({ input: 0, output: 100 })
+          .item(),
+      )
+      yield* llm.textMatch(serving("MARKER-HELPER"), "child done")
+      yield* llm.textMatch(serving("MARKER-BUILD"), "first summary")
+      yield* llm.textMatch(serving("MARKER-BUILD"), "second summary")
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "delegate and keep going" }],
+      })
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // The detached task outlives the run that started it, so the turn its result sets off comes
+      // after the loop returned. Four hits: two of the caller's, the subagent's, and that one.
+      yield* awaitWithTimeout(llm.wait(4), "the background result never reached the caller", "20 seconds")
+      const hits = yield* llm.hits
+      const parent = servedTo(hits, "MARKER-BUILD")
+      expect(servedTo(hits, "MARKER-HELPER")).toHaveLength(1)
+      expect(parent).toHaveLength(3)
+      // The ceiling ended the request on the caller's second turn.
+      expect(JSON.stringify(parent[1]?.body)).toContain("BUDGET EXHAUSTED")
+      expect(parent[1]?.body.tools).toBeUndefined()
+      // And the delivery is the same request still: over the ceiling, so still text-only. Tools come
+      // back with the next user input, which is what the prompt shown at the ceiling promises.
+      expect(JSON.stringify(parent[2]?.body)).toContain("BUDGET EXHAUSTED")
+      expect(parent[2]?.body.tools).toBeUndefined()
+
+      for (const job of yield* background.list()) yield* background.cancel(job.id)
+    }),
+  60_000,
+)
