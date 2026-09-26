@@ -2968,6 +2968,51 @@ it.instance(
 )
 
 it.instance(
+  "loop does not ask again when the request it authorized compacts afterwards",
+  () =>
+    Effect.gen(function* () {
+      // The authorization is held against a message id, and an automatic compaction writes a user
+      // message of its own, so the request the person authorized carries on under a different newest
+      // message. Asking again there is the same double question the compaction ordering fixed.
+      const { llm } = yield* useServerConfig(
+        budgetCfg(
+          { budget: 0.5, permission: { budget: "ask" } },
+          "test/test-small",
+          { input: 0, output: 900 },
+          {
+            context: 2000,
+            output: 500,
+          },
+        ),
+      )
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spend(chat.id, 1)
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "find text files" }],
+      })
+      // Authorized, then a turn that overflows the window, so the next step compacts.
+      yield* llm.push(reply().tool("glob", { pattern: "**/*.txt" }).usage({ input: 1600, output: 10 }))
+      yield* llm.text("compacted")
+      yield* llm.text("done")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* answer("budget", "once")
+      // Only one answer is given, so a second question hangs this test.
+      yield* awaitWithTimeout(Fiber.join(fiber), "the loop asked again after compacting the same request", "20 seconds")
+    }),
+  40_000,
+)
+
+it.instance(
   "loop asks once when the checkpoint falls on a step that compacts first",
   () =>
     Effect.gen(function* () {

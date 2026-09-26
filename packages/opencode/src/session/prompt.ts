@@ -1090,12 +1090,13 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
-        // The request an answered budget checkpoint covers. Held as that message's id rather than as
-        // a flag because this invocation outlives one request: a message steered in while the agent
-        // is working joins the same drain — `Runner.ensureRunning` reuses the running fiber — and a
-        // flag would hand it the answer given for the message before it. A different id asks again,
-        // which also covers a steer that switches to an agent with a budget of its own.
-        let authorizedRequest: MessageID | undefined
+        // The request an answered budget checkpoint covers, as the id of the message that request
+        // begins at. Not a flag, because this invocation outlives one request: a message steered in
+        // while the agent is working joins the same drain — `Runner.ensureRunning` reuses the running
+        // fiber — and a flag would hand it the answer given for the message before it. Not the newest
+        // message either, because an automatic compaction writes one of its own mid-request and the
+        // question would be put a second time. `Decision.requestOrigin` is that id.
+        let authorizedRequest: string | undefined
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1265,7 +1266,7 @@ const layer = Layer.effect(
           //
           // One answer covers the request it was given for, not the drain: what bounds a single
           // request that runs away after a yes is `budget_stop`.
-          const asking = checkpointing && authorizedRequest !== lastUser.id
+          const asking = checkpointing && authorizedRequest !== budget.requestOrigin
           // A refusal ends the run the way the ceiling does, and carries what the person said with it.
           const declined =
             asking && limit !== undefined
@@ -1290,7 +1291,7 @@ const layer = Layer.effect(
                       Effect.as(undefined),
                       Effect.tap(() =>
                         Effect.sync(() => {
-                          authorizedRequest = lastUser.id
+                          authorizedRequest = budget.requestOrigin
                         }),
                       ),
                       Effect.catch((error) =>

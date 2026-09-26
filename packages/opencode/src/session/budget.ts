@@ -7,6 +7,12 @@ export type Decision = {
   readonly spent: number
   /** Dollars this agent has spent answering the request it is answering now. */
   readonly spentOnRequest: number
+  /**
+   * The user message this request begins at, which is not the newest one: the loop writes user
+   * messages of its own while a request runs, so anything that has to mean "this request" and outlive
+   * a compaction has to be keyed on this. See `requestChain`.
+   */
+  readonly requestOrigin: string
   /** The soft threshold was reached: run the rest of the session on the cheap model. */
   readonly degrade: boolean
   /** This is the step that reached it, so the agent is told once rather than every turn. */
@@ -45,7 +51,10 @@ export function evaluate(input: {
   )
   const spent = turns.reduce((total, turn) => total + turn.cost, 0)
   const chain = requestChain(input.messages, input.request)
-  const spentOnRequest = turns.filter((turn) => chain.has(turn.parentID)).reduce((total, turn) => total + turn.cost, 0)
+  const answering = new Set(chain)
+  const spentOnRequest = turns
+    .filter((turn) => answering.has(turn.parentID))
+    .reduce((total, turn) => total + turn.cost, 0)
   // What was spent before the most recent turn, which is how a threshold reached now is told apart
   // from one reached several turns ago. The most recent turn is searched for rather than taken from
   // the end of the list: history reaches here in whichever order the caller had it, and reading the
@@ -65,6 +74,7 @@ export function evaluate(input: {
   return {
     spent,
     spentOnRequest,
+    requestOrigin: chain[0] ?? input.request,
     degrade: budget !== undefined && spent >= budget,
     crossed: budget !== undefined && spent >= budget && before < budget,
     stop: input.stop !== undefined && spentOnRequest >= input.stop,
@@ -96,16 +106,14 @@ const compactionPart = (message: SessionV1.WithParts) =>
 function requestChain(messages: readonly SessionV1.WithParts[], request: string) {
   const users = messages.filter((message) => message.info.role === "user").sort(oldestFirst)
   const upto = users.slice(0, users.findIndex((message) => message.info.id === request) + 1)
-  if (upto.length === 0) return new Set([request])
-  return new Set(
-    upto.reduce<string[]>((chain, message, index) => {
-      const previous = upto[index - 1]
-      // A compaction's own message belongs to the request it was queued for, and the message after
-      // an automatic compaction is the continuation that compaction wrote for that same request.
-      return previous !== undefined &&
-        (compactionPart(message) !== undefined || compactionPart(previous)?.auto === true)
-        ? [...chain, message.info.id]
-        : [message.info.id]
-    }, []),
-  )
+  if (upto.length === 0) return [request]
+  // Oldest first, so the head of what comes back is the message the request began at.
+  return upto.reduce<string[]>((chain, message, index) => {
+    const previous = upto[index - 1]
+    // A compaction's own message belongs to the request it was queued for, and the message after
+    // an automatic compaction is the continuation that compaction wrote for that same request.
+    return previous !== undefined && (compactionPart(message) !== undefined || compactionPart(previous)?.auto === true)
+      ? [...chain, message.info.id]
+      : [message.info.id]
+  }, [])
 }
