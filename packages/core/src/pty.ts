@@ -200,6 +200,23 @@ const layer = Layer.effect(
         listeners: [],
       }
       sessions.set(id, session)
+      const reportExit = (exitCode: number) =>
+        Effect.gen(function* () {
+          yield* Effect.logInfo("session exited", { id, exitCode })
+          yield* events.publish(Event.Exited, { id, exitCode })
+          while (exitOrder.length > EXITED_LIMIT) {
+            const oldest = exitOrder[0]
+            if (!oldest) break
+            yield* removeSession(oldest)
+          }
+        })
+      // An exit is held until `Created` has been published, and published by `create` itself if it
+      // arrives first. Publishing `Created` awaits every listener, so a process that exits during
+      // it would otherwise announce its exit to consumers that have not been told the session
+      // exists — and they drop it: `removeExited` in the app looks the id up and returns when it is
+      // absent, leaving a dead terminal listed as running for good.
+      let announced = false
+      let held: number | undefined
       session.listeners.push(
         proc.onData((chunk) => {
           session.cursor += chunk.length
@@ -226,20 +243,18 @@ const layer = Layer.effect(
           session.info.exitCode = exitCode
           notifyEnd(session, { exitCode })
           exitOrder.push(id)
-          runFork(
-            Effect.gen(function* () {
-              yield* Effect.logInfo("session exited", { id, exitCode })
-              yield* events.publish(Event.Exited, { id, exitCode })
-              while (exitOrder.length > EXITED_LIMIT) {
-                const oldest = exitOrder[0]
-                if (!oldest) break
-                yield* removeSession(oldest)
-              }
-            }),
-          )
+          if (!announced) {
+            held = exitCode
+            return
+          }
+          runFork(reportExit(exitCode))
         }),
       )
       yield* events.publish(Event.Created, { info })
+      announced = true
+      // Reached only when the exit arrived during the publish above. A `Created` that fails or is
+      // interrupted never gets here, so no `Exited` follows one that was never announced.
+      if (held !== undefined) yield* reportExit(held)
       return info
     })
 
