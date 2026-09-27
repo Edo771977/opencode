@@ -1767,8 +1767,16 @@ it.instance(
 
       expect(yield* llm.calls).toBe(0)
 
-      yield* Fiber.await(sh)
-      const exit = yield* Fiber.await(loop)
+      // Bounded and named rather than left to the test's own ceiling. Measured on Linux this whole
+      // test is 1.8s, so 30s was never a tight budget for it — and yet it died at exactly 30s on a
+      // hosted Windows runner, which says something waited rather than that everything was slow.
+      // Which of the two it was is what the ceiling could not say and these can.
+      yield* awaitWithTimeout(Fiber.await(sh), "the shell never exited", "15 seconds")
+      const exit = yield* awaitWithTimeout(
+        Fiber.await(loop),
+        "the loop never finished after the shell exited",
+        "15 seconds",
+      )
 
       expect(Exit.isSuccess(exit)).toBe(true)
       if (Exit.isSuccess(exit)) {
@@ -1805,8 +1813,14 @@ it.instance(
 
       expect(yield* llm.calls).toBe(0)
 
-      yield* Fiber.await(sh)
-      const [ea, eb] = yield* Effect.all([Fiber.await(a), Fiber.await(b)])
+      // Same as the test above: 2.5s of work, a 30s ceiling, and a Windows run that reached the
+      // ceiling. Named waits say which side stopped.
+      yield* awaitWithTimeout(Fiber.await(sh), "the shell never exited", "15 seconds")
+      const [ea, eb] = yield* awaitWithTimeout(
+        Effect.all([Fiber.await(a), Fiber.await(b)]),
+        "a queued loop caller never resumed after the shell exited",
+        "15 seconds",
+      )
 
       expect(Exit.isSuccess(ea)).toBe(true)
       expect(Exit.isSuccess(eb)).toBe(true)
