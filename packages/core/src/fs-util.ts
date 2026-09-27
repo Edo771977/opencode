@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from
 import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { lookup } from "mime-types"
-import { Context, Effect, FileSystem, Layer, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Schedule, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./util/glob"
 import { serviceUse } from "./effect/service-use"
@@ -219,6 +219,38 @@ export namespace FSUtil {
   )
 
   export const node = makeGlobalNode({ service: Service, layer: layer, deps: [filesystem] })
+
+  // Windows refuses to rename a directory while anything still holds a handle inside it, and the
+  // refusal passes: whatever was reading in there, or the scanner that followed it in, lets go in a
+  // moment. Retrying it is the difference between a temp-then-rename swap landing and being thrown
+  // away, and it is bounded because a refusal that will not pass has to fail rather than spin.
+  const HELD_BASE_DELAY_MS = 25
+  const HELD_MAX_DELAY_MS = 250
+  const HELD_TIMEOUT_MS = 3_000
+
+  const heldSchedule = Schedule.exponential(HELD_BASE_DELAY_MS, 1.7).pipe(
+    Schedule.either(Schedule.spaced(HELD_MAX_DELAY_MS)),
+    Schedule.jittered,
+    Schedule.while((meta) => meta.elapsed < HELD_TIMEOUT_MS),
+  )
+
+  // EPERM is how the refusal arrives and it has no reason of its own: `handleErrnoException` in
+  // @effect/platform-node-shared gives EACCES `PermissionDenied` and EBUSY `Busy` and leaves
+  // everything else `Unknown`, so the cause's code is what separates a directory that is held from
+  // a path that will never be writable. Read off a real one rather than assumed: provoked through
+  // `rename` against a directory whose parent was immutable, a kernel EPERM arrives as
+  // `reason._tag: "Unknown"` carrying `reason.cause.code: "EPERM"`.
+  const held = (error: PlatformError) =>
+    error.reason._tag === "Busy" ||
+    error.reason._tag === "PermissionDenied" ||
+    (error.reason._tag === "Unknown" &&
+      typeof error.reason.cause === "object" &&
+      error.reason.cause !== null &&
+      "code" in error.reason.cause &&
+      error.reason.cause.code === "EPERM")
+
+  export const retryWhileHeld = <A, R>(effect: Effect.Effect<A, PlatformError, R>) =>
+    effect.pipe(Effect.retry({ while: held, schedule: heldSchedule }))
 
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {

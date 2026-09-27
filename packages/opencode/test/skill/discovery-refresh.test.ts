@@ -1,4 +1,4 @@
-import { expect, beforeAll, afterAll } from "bun:test"
+import { describe, expect, beforeAll, afterAll } from "bun:test"
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -6,21 +6,21 @@ import { filesystem } from "@opencode-ai/core/effect/app-node-platform"
 import { Global } from "@opencode-ai/core/global"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Effect, FileSystem, Layer } from "effect"
-import * as PlatformError from "effect/PlatformError"
+import { systemError } from "effect/PlatformError"
 import { rm } from "fs/promises"
 import path from "path"
 import { Discovery } from "../../src/skill/discovery"
 import { testEffect } from "../lib/effect"
 
-// Windows refuses to rename a directory while anything still holds a handle inside it, which is
-// how a skill refresh came to keep its cached copy on a hosted runner. The refusal cannot be
-// produced on the runners this suite runs on, so it is injected at the one call it reaches —
-// `rename` — and built by the same constructor the platform uses, rather than hand-shaped here.
-// A real one, captured through `fs.rename` against a directory whose parent was made immutable,
-// is `reason._tag: "Unknown"` carrying `reason.cause.code: "EPERM"`: EACCES and EBUSY are given
-// reasons of their own by @effect/platform-node-shared and EPERM is not.
+// Windows refuses to rename a directory while anything still holds a handle inside it, which is how
+// a skill refresh came to keep its cached copy on a hosted runner. That refusal cannot be provoked
+// on the runners this suite runs on, so it is injected at the one call it reaches — `rename` — and
+// built by the platform's own constructor rather than shaped by hand here. A real one, captured
+// through `fs.rename` against a directory whose parent was made immutable, is `reason._tag:
+// "Unknown"` carrying `reason.cause.code: "EPERM"`: @effect/platform-node-shared gives EACCES and
+// EBUSY reasons of their own and leaves EPERM without one.
 const eperm = (from: string) =>
-  PlatformError.systemError({
+  systemError({
     _tag: "Unknown",
     module: "FileSystem",
     method: "rename",
@@ -29,7 +29,9 @@ const eperm = (from: string) =>
     cause: Object.assign(new Error(`EPERM: operation not permitted, rename '${from}'`), { code: "EPERM" }),
   })
 
-let refusalsLeft = 0
+// Which renames the platform refuses, and how many were actually refused. Each test sets the first
+// and reads the second: without that count a retry that never ran would look like one that did.
+let refuse: (from: string) => boolean = () => false
 let refused = 0
 
 const refusingFilesystem = makeGlobalNode({
@@ -41,12 +43,10 @@ const refusingFilesystem = makeGlobalNode({
       return {
         ...real,
         // Suspended so the decision is taken on every execution: built eagerly, a retry would
-        // re-run the same failed Effect and the count below would see one refusal however many
-        // times it was tried.
+        // re-run the same failed Effect and the count would stay at one however often it was tried.
         rename: (from: string, to: string) =>
           Effect.suspend(() => {
-            if (refusalsLeft <= 0) return real.rename(from, to)
-            refusalsLeft--
+            if (!refuse(from)) return real.rename(from, to)
             refused++
             return Effect.fail(eperm(from))
           }),
@@ -63,10 +63,22 @@ const it = testEffect(
 let url: string
 let server: ReturnType<typeof Bun.serve>
 let version = "1"
-let content = "# Old"
+let content = "# One"
 
 const cacheDir = path.join(Global.Path.cache, "skills")
 const read = (dir: string) => Effect.promise(() => Bun.file(path.join(dir, "SKILL.md")).text())
+
+// Publishes a version and pulls it with nothing refused, so each test starts from a cache it put
+// there itself and can be run alone.
+const publish = (next: string, text: string) =>
+  Effect.gen(function* () {
+    version = next
+    content = text
+    refuse = () => false
+    refused = 0
+    const dirs = yield* (yield* Discovery.Service).pull(url)
+    expect(yield* read(dirs[0])).toBe(text)
+  })
 
 beforeAll(async () => {
   await rm(cacheDir, { recursive: true, force: true })
@@ -86,50 +98,71 @@ afterAll(() => {
   void server?.stop(true)
 })
 
-it.live(
-  "retries a refused swap and lands the refreshed skill",
-  () =>
-    Effect.gen(function* () {
-      const discovery = yield* Discovery.Service
+describe("Discovery.pull under a refused swap", () => {
+  it.live(
+    "retries a refusal that passes and lands the refreshed skill",
+    () =>
+      Effect.gen(function* () {
+        yield* publish("1", "# One")
 
-      const first = yield* discovery.pull(url)
-      expect(yield* read(first[0])).toBe("# Old")
+        version = "2"
+        content = "# Two"
+        let left = 2
+        refuse = () => left-- > 0
 
-      version = "2"
-      content = "# New"
-      refused = 0
-      refusalsLeft = 2
+        const dirs = yield* (yield* Discovery.Service).pull(url)
 
-      const second = yield* discovery.pull(url)
+        expect(refused).toBe(2)
+        expect(yield* read(dirs[0])).toBe("# Two")
+      }),
+    30_000,
+  )
 
-      // Both halves of the assertion matter: that the refusal was actually delivered, and that the
-      // refresh survived it. Without the first, a retry that never ran would look the same.
-      expect(refused).toBe(2)
-      expect(refusalsLeft).toBe(0)
-      expect(yield* read(second[0])).toBe("# New")
-    }),
-  30_000,
-)
+  it.live(
+    "retries the refusal on moving the download in, and restores the cached copy when it does not pass",
+    () =>
+      Effect.gen(function* () {
+        yield* publish("3", "# Three")
 
-it.live(
-  "keeps the cached skill when the swap is refused for good",
-  () =>
-    Effect.gen(function* () {
-      const discovery = yield* Discovery.Service
+        version = "4"
+        content = "# Four"
+        // Only the second rename of the swap, `staging` -> `root`, which the first test never
+        // reaches. It is also the only way into the rollback: with `root` already moved aside, a
+        // refusal here is what has to put it back, and a swap that gave up without restoring would
+        // lose the skill outright rather than leave it stale.
+        refuse = (from) => from.includes(".tmp-")
 
-      version = "3"
-      content = "# Newer"
-      refused = 0
-      refusalsLeft = Number.POSITIVE_INFINITY
+        const dirs = yield* (yield* Discovery.Service).pull(url)
 
-      const dirs = yield* discovery.pull(url)
+        expect(refused).toBeGreaterThan(10)
+        expect(dirs.length).toBe(1)
+        expect(yield* read(dirs[0])).toBe("# Three")
+      }),
+    60_000,
+  )
 
-      // The retry gives up rather than hanging, and an unrefreshed skill stays usable at the
-      // version it already had: a stale skill is worth more here than none.
-      expect(refused).toBeGreaterThan(1)
-      expect(yield* read(dirs[0])).toBe("# New")
+  it.live(
+    "gives the refusal up rather than spinning, and keeps the cached skill",
+    () =>
+      Effect.gen(function* () {
+        yield* publish("5", "# Five")
 
-      refusalsLeft = 0
-    }),
-  60_000,
-)
+        version = "6"
+        content = "# Six"
+        refuse = () => true
+
+        const started = Date.now()
+        const dirs = yield* (yield* Discovery.Service).pull(url)
+        const elapsed = Date.now() - started
+
+        // The bound is the point of this one: it has to stop on its own, and near three seconds
+        // rather than whenever the test's own ceiling runs out.
+        expect(elapsed).toBeLessThan(10_000)
+        expect(refused).toBeGreaterThan(10)
+        expect(yield* read(dirs[0])).toBe("# Five")
+
+        refuse = () => false
+      }),
+    60_000,
+  )
+})
