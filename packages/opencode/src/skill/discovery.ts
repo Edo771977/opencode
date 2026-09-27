@@ -103,20 +103,29 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
                 if (!downloaded.every(Boolean)) return
                 if (!(yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie))) return
                 yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                yield* Effect.uninterruptible(
-                  Effect.gen(function* () {
-                    const cached = yield* fs.exists(root).pipe(Effect.orDie)
-                    if (cached) yield* fs.rename(root, backup)
-                    yield* fs.rename(staging, root).pipe(
-                      Effect.catch((error) =>
-                        Effect.gen(function* () {
-                          if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
-                          return yield* Effect.fail(error)
-                        }),
-                      ),
-                    )
-                    if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
-                  }),
+                // Retried as a whole rather than one rename at a time: an attempt either lands or
+                // rolls itself back, so between attempts the disk holds the old version instead of
+                // nothing, the waits sit outside the mask and stay interruptible, and one bound
+                // covers the swap instead of one per rename. Re-entering re-reads whether the
+                // cached copy is still there, which is what recovers a rollback refused in turn.
+                yield* FSUtil.retryWhileHeld(
+                  Effect.uninterruptible(
+                    Effect.gen(function* () {
+                      const cached = yield* fs.exists(root).pipe(Effect.orDie)
+                      if (cached) yield* fs.rename(root, backup)
+                      yield* fs.rename(staging, root).pipe(
+                        Effect.catch((error) =>
+                          Effect.gen(function* () {
+                            if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
+                            return yield* Effect.fail(error)
+                          }),
+                        ),
+                      )
+                      // Left ignored on purpose: a refused delete only litters, and failing the
+                      // block for it would retry a swap that has already landed.
+                      if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
+                    }),
+                  ),
                 )
               }).pipe(
                 Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),
