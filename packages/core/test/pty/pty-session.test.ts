@@ -90,6 +90,69 @@ const waitForOutput = (output: Queue.Queue<string>, text: string) =>
     }),
   )
 
+// `EXITED_LIMIT` in src/pty.ts, which is not exported. Changing it there fails the tests below
+// loudly rather than quietly.
+const EXITED_LIMIT = 25
+
+// Exercising the cap needs one more exit than it retains, and bun-pty loses an exit outright when
+// the 8ms timer it watches for one is starved: measured at roughly one short-lived session in thirty
+// under three busy cores, which is 26 chances per run and made both tests below fail six runs in ten.
+// That is #29, it is not what they cover, and serialising the spawns did not help — the loss hits a
+// session with nothing else running. So a session that goes quiet is removed and respawned, on a
+// budget: the cap is still measured on real exits, and exhausting the budget fails loudly instead of
+// waiting on a total that can no longer fall.
+const EXIT_WAIT = "3 seconds"
+const RESPAWN_BUDGET = 6
+
+const createExiting = Effect.fn("PtySessionTest.createExiting")(function* (count: number) {
+  const pty = yield* Pty.Service
+  let budget = RESPAWN_BUDGET
+  const exited = (id: PtyID) =>
+    Effect.gen(function* () {
+      while ((yield* pty.get(id)).status === "running") yield* Effect.sleep("5 millis")
+    }).pipe(Effect.timeout(EXIT_WAIT), Effect.isSuccess)
+
+  return yield* Effect.forEach(Array.from({ length: count }), () =>
+    Effect.gen(function* () {
+      while (true) {
+        const info = yield* pty.create({ command: "/bin/true", cwd: "/tmp" })
+        if (yield* exited(info.id)) return info
+        yield* pty.remove(info.id).pipe(Effect.ignore)
+        budget -= 1
+        if (budget < 0)
+          return yield* Effect.fail(new Error(`more than ${RESPAWN_BUDGET} sessions never reported an exit; see #29`))
+      }
+    }),
+  )
+})
+
+// Waits for the state an eviction produces, not for a bound on it. Two conditions that read as
+// equivalent are not, and both passed against a cap doing nothing: `exited.length <= EXITED_LIMIT`
+// holds before anything has exited at all, and `exited.length === EXITED_LIMIT` holds while a 26th
+// session is still running and nothing has been evicted — exit detection is one poll loop per
+// session, so the newest is regularly seen exited before an older one. Only an eviction brings the
+// *total* down to the cap.
+const waitForCap = (created: readonly Pty.Info[]) =>
+  Effect.gen(function* () {
+    const pty = yield* Pty.Service
+    const newest = created[created.length - 1].id
+    while (true) {
+      const all = yield* pty.list()
+      if (
+        all.length === EXITED_LIMIT &&
+        all.every((info) => info.status === "exited") &&
+        all.some((info) => info.id === newest)
+      )
+        return all
+      yield* Effect.sleep("20 millis")
+    }
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: "10 seconds",
+      orElse: () => Effect.fail(new Error("retained sessions never settled at the cap")),
+    }),
+  )
+
 describe("pty", () => {
   it.live("returns typed not found errors for missing sessions", () =>
     Effect.gen(function* () {
@@ -126,6 +189,58 @@ describe("pty", () => {
       const missing = yield* pty.get(info.id).pipe(Effect.exit)
       expect(Exit.isFailure(missing)).toBe(true)
     }),
+  )
+
+  // Nothing covered the retention cap before these two, so nothing would have noticed it failing to
+  // trim at all.
+  ptyTest(
+    "trims retained sessions down to the cap",
+    () =>
+      Effect.gen(function* () {
+        const pty = yield* Pty.Service
+        const created = yield* createExiting(26)
+        const retained = yield* waitForCap(created)
+        expect(retained.length).toBe(EXITED_LIMIT)
+        yield* Effect.forEach(retained, (info) => pty.remove(info.id).pipe(Effect.ignore))
+      }),
+    30_000,
+  )
+
+  // A consumer is allowed to call back into the service from `onEnd`, and `attach` says those
+  // callbacks run synchronously from the PTY's own data path. One that removes the session runs
+  // while the exit handler has not yet recorded the id, so the removal finds nothing to unrecord and
+  // the handler then records an id no session answers to. Left on the head of the ordering list, an
+  // id like that was retried forever and the cap never trimmed again.
+  ptyTest(
+    "keeps the cap working after a consumer removes a session from its end callback",
+    () =>
+      Effect.gen(function* () {
+        const pty = yield* Pty.Service
+        const context = yield* Effect.context()
+        const runFork = Effect.runForkWith(context)
+        const victim = yield* pty.create({ command: "cat", cwd: "/tmp" })
+        const attachment = yield* pty.attach(victim.id, {
+          onData: () => {},
+          onEnd: () => void runFork(pty.remove(victim.id).pipe(Effect.ignore)),
+        })
+        attachment.activate()
+
+        yield* pty.write(victim.id, "\u0004")
+        yield* Effect.gen(function* () {
+          while (Exit.isSuccess(yield* pty.get(victim.id).pipe(Effect.exit))) yield* Effect.sleep("20 millis")
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () => Effect.fail(new Error("the end callback never removed its session")),
+          }),
+        )
+
+        const created = yield* createExiting(26)
+        const retained = yield* waitForCap(created)
+        expect(retained.length).toBe(EXITED_LIMIT)
+        yield* Effect.forEach(retained, (info) => pty.remove(info.id).pipe(Effect.ignore))
+      }),
+    30_000,
   )
 
   ptyTest("replays buffered output and streams live output to attachments", () =>

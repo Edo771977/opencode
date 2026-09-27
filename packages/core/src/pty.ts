@@ -139,11 +139,14 @@ const layer = Layer.effect(
     })
 
     const removeSession = Effect.fnUntraced(function* (id: PtyID) {
+      // Unrecorded first, and whether or not the session is still here. The trim loop below takes
+      // `exitOrder[0]` and calls this until the list is short enough, so an id this left behind
+      // would sit at the head and be retried forever.
+      const index = exitOrder.indexOf(id)
+      if (index !== -1) exitOrder.splice(index, 1)
       const session = sessions.get(id)
       if (!session) return
       sessions.delete(id)
-      const index = exitOrder.indexOf(id)
-      if (index !== -1) exitOrder.splice(index, 1)
       yield* Effect.logInfo("removing session", { id })
       teardown(session)
       yield* events.publish(Event.Deleted, { id: session.info.id })
@@ -241,8 +244,12 @@ const layer = Layer.effect(
           if (session.info.status === "exited") return
           session.info.status = "exited"
           session.info.exitCode = exitCode
-          notifyEnd(session, { exitCode })
+          // Recorded before the subscribers are told, because `notifyEnd` calls their `onEnd`
+          // synchronously and one that removes this session would otherwise run while the id is not
+          // on the list yet: its removal would find nothing to unrecord, and the push below would
+          // then record an id no session answers to.
           exitOrder.push(id)
+          notifyEnd(session, { exitCode })
           if (!announced) {
             held = exitCode
             return
