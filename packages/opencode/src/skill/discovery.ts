@@ -1,7 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient, path } from "@opencode-ai/core/effect/app-node-platform"
 import { NodePath } from "@effect/platform-node"
-import { Effect, Layer, Path, Schema, Context } from "effect"
+import { Effect, Layer, Path, Schedule, Schema, Context } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -9,6 +9,17 @@ import { Global } from "@opencode-ai/core/global"
 
 const skillConcurrency = 4
 const fileConcurrency = 8
+
+// Windows refuses to rename a directory while anything still holds a handle inside it, and
+// the refusal passes: whatever was reading, or the scanner that followed it in, lets go in a
+// moment. Seen as EPERM renaming a cached skill out of the way on a hosted Windows runner,
+// where it cost the refresh — the downloaded version was discarded and the stale one kept,
+// with only a log line to say so.
+const renameRetry = Schedule.exponential(25, 1.7).pipe(
+  Schedule.either(Schedule.spaced(250)),
+  Schedule.jittered,
+  Schedule.while((meta) => meta.elapsed < 3_000),
+)
 
 class IndexSkill extends Schema.Class<IndexSkill>("IndexSkill")({
   name: Schema.String,
@@ -45,6 +56,25 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
         Effect.catch((err) => Effect.logError("failed to download", { url: url, error: err }).pipe(Effect.as(false))),
       )
     })
+
+    // Retried on the codes that mean the directory is held rather than unwritable. EPERM has no
+    // reason of its own — @effect/platform-node-shared maps EACCES to PermissionDenied and EBUSY
+    // to Busy and leaves everything else Unknown — so the cause is what tells it apart, and
+    // catching Unknown alone would retry failures that are not going to pass.
+    const swap = (from: string, to: string) =>
+      fs.rename(from, to).pipe(
+        Effect.retry({
+          while: (error) =>
+            error.reason._tag === "Busy" ||
+            error.reason._tag === "PermissionDenied" ||
+            (error.reason._tag === "Unknown" &&
+              typeof error.reason.cause === "object" &&
+              error.reason.cause !== null &&
+              "code" in error.reason.cause &&
+              error.reason.cause.code === "EPERM"),
+          schedule: renameRetry,
+        }),
+      )
 
     const pull = Effect.fn("Discovery.pull")(function* (url: string) {
       const base = url.endsWith("/") ? url : `${url}/`
@@ -106,8 +136,8 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
                 yield* Effect.uninterruptible(
                   Effect.gen(function* () {
                     const cached = yield* fs.exists(root).pipe(Effect.orDie)
-                    if (cached) yield* fs.rename(root, backup)
-                    yield* fs.rename(staging, root).pipe(
+                    if (cached) yield* swap(root, backup)
+                    yield* swap(staging, root).pipe(
                       Effect.catch((error) =>
                         Effect.gen(function* () {
                           if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
