@@ -272,19 +272,22 @@ export namespace FSUtil {
   export const sweepStale = (fs: Interface, directory: string) =>
     Effect.gen(function* () {
       const entries = yield* fs.readDirectoryEntries(directory).pipe(Effect.orElseSucceed(() => [] as DirEntry[]))
-      // Directories on both sides, because the rule is about a swap and a swap only ever moves
-      // directories. A plain file at `<name>` is not the cached directory being back in place, and
-      // taking it for one deletes a backup that is still the only copy: measured, a file named
-      // `deploy` beside `deploy.old-<uuid>` left nothing but the file. Reachable rather than
-      // theoretical while V1 discovery writes whatever path a remote index names (#38).
-      const directories = new Set(entries.filter((entry) => entry.type === "directory").map((entry) => entry.name))
       const collectable = yield* Effect.forEach(entries, (entry) =>
         Effect.gen(function* () {
+          // A swap only ever moves directories, so anything else wearing the shape was put there by
+          // something other than a swap and is not ours to delete.
           if (entry.type !== "directory") return undefined
           const leftover = LEFTOVER.exec(entry.name)
           if (!leftover) return undefined
           const target = join(directory, entry.name)
-          if (leftover[2] === "old") return directories.has(leftover[1]) ? target : undefined
+          // `<name>` back in place has to mean the cached directory. A plain file there is not a
+          // swap having landed, and taking it for one deletes a backup that is still the only copy:
+          // measured, a file `deploy` beside a `deploy.old-<uuid>` holding the only `SKILL.md` left
+          // nothing but the file. Reachable while V1 discovery writes whatever path a remote index
+          // names (#38). This follows links, unlike the kind check above, because a symlink
+          // resolving to the directory is it back in place — and a backup whose pair cannot be
+          // confirmed is kept forever, there being no age test for backups.
+          if (leftover[2] === "old") return (yield* fs.isDir(join(directory, leftover[1]))) ? target : undefined
           const stat = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (!stat) return undefined
           return Date.now() - Option.getOrElse(stat.mtime, () => new Date()).getTime() > STAGING_MAX_AGE_MS

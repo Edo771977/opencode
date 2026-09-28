@@ -8,8 +8,9 @@ jobs:
   check-duplicates:
     # `OPENCODE_API_KEY` belongs to the upstream account, so on a fork every one of these steps runs
     # — checkout, install, the opencode install script — to reach a reporter that cannot answer. The
-    # guard thirteen other jobs across ten workflows already carry, though not every job that reads
-    # this secret: `triage.yml` and `duplicate-issues.yml` still spend a fork's minutes the same way.
+    # guard fourteen other jobs across ten other workflows already carry — though one of those names
+    # `sst/opencode` and so is dead here, and it is not every job that reads this secret: `triage`,
+    # `duplicate-issues`, `opencode` and `review` still spend a fork's minutes the same way (#43).
     if: github.repository == 'anomalyco/opencode'
     runs-on: ubuntu-latest
     permissions:
@@ -69,13 +70,17 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           COMMENT=$(bun script/duplicate-pr.ts -f pr_info.txt "Check the attached file for PR details and search for duplicates")
+          # Trimmed once, and both tests below read the trimmed copy. Testing only emptiness left the
+          # sentinel comparison leaning on the script's own `.trim()`, so a padded
+          # "No duplicate PRs found" posted a comment saying exactly that.
+          TRIMMED=$(printf '%s' "$COMMENT" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
           # Empty output is not a report of no duplicates, and empty is what a missing key, a network
           # error or a model that answered nothing all look like. Annotated rather than posted, so it
           # is visible on the run instead of under a preamble on someone's pull request.
-          if [ -z "${COMMENT//[[:space:]]/}" ]; then
+          if [ -z "$TRIMMED" ]; then
             echo "::warning::duplicate-pr.ts returned no output; posting nothing. Is OPENCODE_API_KEY set?"
-          elif [ "$COMMENT" != "No duplicate PRs found" ]; then
+          elif [ "$TRIMMED" != "No duplicate PRs found" ]; then
             gh pr comment "$PR_NUMBER" --body "_The following comment was made by an LLM, it may be inaccurate:_
 
           $COMMENT"

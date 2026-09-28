@@ -540,10 +540,14 @@ const layer = Layer.effect(
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
               // Pairs with "running shell" above: between the two sit the spawn, the output drain and
-              // the wait for the exit code, so a stall shows which side of them it is on. It belongs
-              // inside this uninterruptible block rather than next to its caller, because the caller
-              // reaches that point with the interrupt of an aborted command still pending — an
-              // interruptible line there unwinds the fiber and this whole block stops running.
+              // the wait for the exit code, so a stall shows which side of them it is on.
+              //
+              // It sits here rather than next to the caller for no interruptibility reason, contrary
+              // to what an earlier version of this comment claimed: `Effect.uninterruptibleMask` at
+              // the top of `shellImpl` covers both positions, and the only interruptible part
+              // between them is the `restore(...)` block itself. What does matter is that `finish`
+              // stays uninterruptible — made `Effect.interruptible`, an aborted command loses this
+              // whole block and `cancel interrupts loop queued behind shell` fails in two seconds.
               yield* Effect.logInfo("shell finished", { shell: sh, aborted, output: output.length })
               if (aborted) {
                 output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")

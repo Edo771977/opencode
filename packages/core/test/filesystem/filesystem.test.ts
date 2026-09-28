@@ -5,6 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { testEffect } from "../lib/effect"
 import path from "path"
+import { mkdir, symlink, writeFile } from "node:fs/promises"
 
 const live = LayerNode.compile(LayerNode.group([FSUtil.node, LayerNodePlatform.filesystem]))
 const { effect: it } = testEffect(live)
@@ -383,5 +384,58 @@ describe("FSUtil", () => {
       expect(FSUtil.overlaps("/a/b", "/a/bad")).toBe(false)
       if (process.platform === "win32") expect(FSUtil.overlaps("C:\\a", "D:\\b")).toBe(false)
     })
+  })
+  // The sweeper's own guards live here as well as in the two skill-discovery suites, because those
+  // are in `packages/opencode` and `packages/core` respectively: deleting both guards left a
+  // `packages/core` run entirely green, which is the run somebody editing this file will do.
+  describe("sweepStale", () => {
+    const leftover = (dir: string, name: string) => path.join(dir, `${name}.old-${crypto.randomUUID()}`)
+
+    it(
+      "collects a backup whose directory is back in place, through a symlink as well",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const tmp = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped()
+        const paired = leftover(tmp, "plain")
+        const linked = leftover(tmp, "linked")
+        yield* Effect.promise(async () => {
+          await mkdir(path.join(tmp, "plain"))
+          await mkdir(path.join(tmp, "elsewhere"))
+          await symlink(path.join(tmp, "elsewhere"), path.join(tmp, "linked"))
+          await mkdir(paired)
+          await mkdir(linked)
+        })
+        yield* FSUtil.sweepStale(fs, tmp)
+        expect(yield* fs.existsSafe(paired)).toBe(false)
+        // A symlink resolving to the directory is the directory, back in place. Judged by kind
+        // rather than by resolution, this backup would be immortal: backups have no age test.
+        expect(yield* fs.existsSafe(linked)).toBe(false)
+      }),
+    )
+
+    it(
+      "keeps a backup whose name is not a directory, and a leftover that is not one either",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const tmp = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped()
+        const shadowed = leftover(tmp, "pinned")
+        const orphan = leftover(tmp, "gone")
+        const fileShaped = leftover(tmp, "kept")
+        yield* Effect.promise(async () => {
+          // A file where the cached directory would be: not the swap having landed, so its backup
+          // may still be the only copy of that skill.
+          await writeFile(path.join(tmp, "pinned"), "not a directory")
+          await mkdir(path.join(tmp, "kept"))
+          await mkdir(shadowed)
+          await mkdir(orphan)
+          // Right shape, wrong kind: a swap never leaves a file behind, so this is somebody else's.
+          await writeFile(fileShaped, "not a directory either")
+        })
+        yield* FSUtil.sweepStale(fs, tmp)
+        expect(yield* fs.isDir(shadowed)).toBe(true)
+        expect(yield* fs.isDir(orphan)).toBe(true)
+        expect(yield* fs.isFile(fileShaped)).toBe(true)
+      }),
+    )
   })
 })

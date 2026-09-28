@@ -446,7 +446,10 @@ describe("cross-spawn spawner", () => {
       duration: `${number} seconds` = "10 seconds",
     ) => effect.pipe(Effect.timeoutOrElse({ duration, orElse: () => Effect.fail(new Error(message)) }))
 
-    const drain = (handle: { all: Stream.Stream<Uint8Array, PlatformError.PlatformError> }) =>
+    // The label is the point: if the drain is what stalls in the third case below, a Windows run
+    // has to say which of pwsh, powershell, Git Bash or cmd was on the other end of it, which is
+    // the whole reason these exist.
+    const drain = (handle: { all: Stream.Stream<Uint8Array, PlatformError.PlatformError> }, what: string) =>
       Effect.gen(function* () {
         let out = ""
         yield* bounded(
@@ -455,7 +458,7 @@ describe("cross-spawn spawner", () => {
               out += chunk
             }),
           ),
-          "the merged output never ended",
+          `the merged output of ${what} never ended`,
         )
         return out
       })
@@ -467,10 +470,11 @@ describe("cross-spawn spawner", () => {
           stdin: "ignore",
           forceKillAfter: "3 seconds",
         })
-        const out = yield* drain(handle)
+        const out = yield* drain(handle, "a node child")
         expect(out).toContain("out")
         expect(out).toContain("err")
       }),
+      30_000,
     )
 
     fx.live(
@@ -480,10 +484,11 @@ describe("cross-spawn spawner", () => {
           stdin: "ignore",
           forceKillAfter: "3 seconds",
         })
-        expect(yield* drain(handle)).toContain("done")
+        expect(yield* drain(handle, "a node child")).toContain("done")
         const code = yield* bounded(handle.exitCode, "the exit code never arrived after the output ended")
         expect(code).toBe(ChildProcessSpawner.ExitCode(7))
       }),
+      30_000,
     )
 
     fx.live(
@@ -504,7 +509,7 @@ describe("cross-spawn spawner", () => {
             }),
           ),
         )
-        expect(yield* drain(handle)).toContain("opencode-shell-ok")
+        expect(yield* drain(handle, shell)).toContain("opencode-shell-ok")
         const code = yield* bounded(
           handle.exitCode,
           `the exit code of ${shell} never arrived after the output ended`,
@@ -512,7 +517,9 @@ describe("cross-spawn spawner", () => {
         )
         expect(code).toBe(ChildProcessSpawner.ExitCode(0))
       }),
-      30_000,
+      // Above the sum of the two bounds, not equal to it: at 30s a double stall races the suite
+      // ceiling and reports `timed out after 30000ms`, which is the message these exist to avoid.
+      45_000,
     )
   })
 })
