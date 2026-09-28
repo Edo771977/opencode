@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from
 import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { lookup } from "mime-types"
-import { Context, Effect, FileSystem, Layer, Schedule, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Schedule, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./util/glob"
 import { serviceUse } from "./effect/service-use"
@@ -255,33 +255,41 @@ export namespace FSUtil {
   // A swap that cannot delete what it moved aside leaves `<name>.old-<uuid>` behind, and a refresh
   // that dies mid-download leaves `<name>.tmp-<uuid>`. Both of those deletes are ignored where they
   // happen, for reasons that hold — failing the swap for a refused delete would retry one that has
-  // already landed, and failing the refresh would bury the error that matters — but nothing then
-  // collected them, so each refused delete left a full copy of a skill in the cache for good.
-  // Collected on the next pass instead, and only once an entry is an hour old: a refresh running
-  // concurrently, in this process or another, has directories seconds old, so it is never the one
-  // swept. A refusal here is ignored in turn, because the next pass comes round again.
-  const STALE_SUFFIX = /\.(old|tmp)-[0-9a-f-]{36}$/
-  const STALE_AGE_MS = 60 * 60 * 1000
+  // already landed — but nothing then collected them, so every refusal left a full copy of a cached
+  // directory on disk for good.
+  //
+  // Neither kind is recognised by its age, because age does not say what it looks like it says:
+  // `rename` leaves the mtime of what it moves alone, so a backup carries the age of the content it
+  // holds rather than the moment it was set aside, and anything cached an hour ago would be
+  // collectable the instant a refresh moved it. What marks a backup as garbage is `<name>` being
+  // back in place. Between the swap's two renames, and after a rollback that was refused in turn,
+  // the backup is the only copy of the directory on disk, and it is exactly then that `<name>` is
+  // missing — so that case keeps it. Staging directories have no such pairing, but they are made
+  // here rather than moved, so their mtime is their own and an hour is far longer than a download.
+  const LEFTOVER = /^(.+)\.(old|tmp)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const STAGING_MAX_AGE_MS = 60 * 60 * 1000
 
   export const sweepStale = (fs: Interface, directory: string) =>
     Effect.gen(function* () {
       const entries = yield* fs.readDirectoryEntries(directory).pipe(Effect.orElseSucceed(() => [] as DirEntry[]))
-      const stale = yield* Effect.promise(async () => {
-        const cutoff = Date.now() - STALE_AGE_MS
-        const candidates = entries
-          .filter((entry) => STALE_SUFFIX.test(entry.name))
-          .map((entry) => join(directory, entry.name))
-        const modified = await Promise.all(
-          candidates.map((target) =>
-            NFS.stat(target)
-              .then((info) => info.mtimeMs)
-              .catch(() => Infinity),
-          ),
-        )
-        return candidates.filter((_, index) => (modified[index] ?? Infinity) < cutoff)
-      })
+      const names = new Set(entries.map((entry) => entry.name))
+      const collectable = yield* Effect.forEach(entries, (entry) =>
+        Effect.gen(function* () {
+          const leftover = LEFTOVER.exec(entry.name)
+          if (!leftover) return undefined
+          const target = join(directory, entry.name)
+          if (leftover[2] === "old") return names.has(leftover[1]) ? target : undefined
+          const stat = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
+          if (!stat) return undefined
+          return Date.now() - Option.getOrElse(stat.mtime, () => new Date()).getTime() > STAGING_MAX_AGE_MS
+            ? target
+            : undefined
+        }),
+      )
+      const stale = collectable.filter((target): target is string => target !== undefined)
       if (stale.length === 0) return
-      yield* Effect.logInfo("sweeping abandoned skill directories", { directory, count: stale.length })
+      yield* Effect.logInfo("sweeping abandoned directories", { directory, count: stale.length })
+      // Ignored in turn: the next pass comes round again.
       yield* Effect.forEach(
         stale,
         (target) => fs.remove(target, { recursive: true, force: true }).pipe(Effect.ignore),

@@ -167,26 +167,34 @@ describe("Discovery.pull under a refused swap", () => {
   )
 
   it.live(
-    "sweeps the copies a refused delete left behind, and leaves a running refresh alone",
+    "sweeps what a refused delete left behind, and keeps what a swap may still need",
     () =>
       Effect.gen(function* () {
         yield* publish("7", "# Seven")
 
-        // What a refused `remove` leaves: the cached copy moved aside and never collected. The name
-        // has to match what the swap produces, uuid and all, or the sweep would be measuring nothing.
+        // The leak: a swap that landed and could not delete what it had moved aside. `held` is back
+        // in place, so the copy under the backup's name answers to nothing.
         const abandoned = path.join(cacheDir, `held.old-${crypto.randomUUID()}`)
+        // The same name shape, but its skill is not there. That is a swap whose rollback was refused
+        // too: the backup is the only copy of the skill left on disk, and sweeping it loses the
+        // skill outright — which is what the two tests above exist to prevent.
+        const rollback = path.join(cacheDir, `gone.old-${crypto.randomUUID()}`)
+        // A download still running, here or in another opencode sharing this cache.
         const inFlight = path.join(cacheDir, `held.tmp-${crypto.randomUUID()}`)
+        // A download that died. Nothing pairs with it, so age is all there is to go on — and its
+        // mtime is its own, because staging directories are made here rather than moved.
+        const stalled = path.join(cacheDir, `held.tmp-${crypto.randomUUID()}`)
         const unrelated = path.join(cacheDir, "held.old-not-a-uuid")
         yield* Effect.promise(async () => {
-          for (const dir of [abandoned, inFlight, unrelated]) {
+          for (const dir of [abandoned, rollback, inFlight, stalled, unrelated]) {
             await mkdir(dir, { recursive: true })
             await writeFile(path.join(dir, "SKILL.md"), "# Leftover")
           }
-          // Only the abandoned one is old. A refresh running right now — in this process or another
-          // opencode — has directories seconds old, and must survive.
-          const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
-          await utimes(abandoned, old, old)
-          await utimes(unrelated, old, old)
+          const hour = new Date(Date.now() - 2 * 60 * 60 * 1000)
+          await utimes(stalled, hour, hour)
+          // Backdated on the two that must survive as well, so nothing here passes by being new.
+          await utimes(rollback, hour, hour)
+          await utimes(unrelated, hour, hour)
         })
 
         version = "8"
@@ -194,13 +202,17 @@ describe("Discovery.pull under a refused swap", () => {
         const dirs = yield* (yield* Discovery.Service).pull(url)
 
         expect(yield* read(dirs[0])).toBe("# Eight")
-        expect(yield* Effect.promise(() => Bun.file(path.join(abandoned, "SKILL.md")).exists())).toBe(false)
-        expect(yield* Effect.promise(() => Bun.file(path.join(inFlight, "SKILL.md")).exists())).toBe(true)
-        // Swept by suffix, not by anything that happens to sit next to a skill.
-        expect(yield* Effect.promise(() => Bun.file(path.join(unrelated, "SKILL.md")).exists())).toBe(true)
+        const left = (dir: string) => Effect.promise(() => Bun.file(path.join(dir, "SKILL.md")).exists())
+        expect(yield* left(abandoned)).toBe(false)
+        expect(yield* left(stalled)).toBe(false)
+        expect(yield* left(rollback)).toBe(true)
+        expect(yield* left(inFlight)).toBe(true)
+        // Swept by the shape the swap produces, not by anything that happens to sit beside a skill.
+        expect(yield* left(unrelated)).toBe(true)
 
-        yield* Effect.promise(() => rm(inFlight, { recursive: true, force: true }))
-        yield* Effect.promise(() => rm(unrelated, { recursive: true, force: true }))
+        yield* Effect.promise(() =>
+          Promise.all([rollback, inFlight, unrelated].map((dir) => rm(dir, { recursive: true, force: true }))),
+        )
       }),
     60_000,
   )
