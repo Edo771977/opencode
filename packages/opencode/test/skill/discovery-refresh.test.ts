@@ -7,7 +7,7 @@ import { Global } from "@opencode-ai/core/global"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Effect, FileSystem, Layer } from "effect"
 import { systemError } from "effect/PlatformError"
-import { rm } from "fs/promises"
+import { mkdir, rm, utimes, writeFile } from "fs/promises"
 import path from "path"
 import { Discovery } from "../../src/skill/discovery"
 import { testEffect } from "../lib/effect"
@@ -162,6 +162,57 @@ describe("Discovery.pull under a refused swap", () => {
         expect(yield* read(dirs[0])).toBe("# Five")
 
         refuse = () => false
+      }),
+    60_000,
+  )
+
+  it.live(
+    "sweeps what a refused delete left behind, and keeps what a swap may still need",
+    () =>
+      Effect.gen(function* () {
+        yield* publish("7", "# Seven")
+
+        // The leak: a swap that landed and could not delete what it had moved aside. `held` is back
+        // in place, so the copy under the backup's name answers to nothing.
+        const abandoned = path.join(cacheDir, `held.old-${crypto.randomUUID()}`)
+        // The same name shape, but its skill is not there. That is a swap whose rollback was refused
+        // too: the backup is the only copy of the skill left on disk, and sweeping it loses the
+        // skill outright — which is what the two tests above exist to prevent.
+        const rollback = path.join(cacheDir, `gone.old-${crypto.randomUUID()}`)
+        // A download still running, here or in another opencode sharing this cache.
+        const inFlight = path.join(cacheDir, `held.tmp-${crypto.randomUUID()}`)
+        // A download that died. Nothing pairs with it, so age is all there is to go on — and its
+        // mtime is its own, because staging directories are made here rather than moved.
+        const stalled = path.join(cacheDir, `held.tmp-${crypto.randomUUID()}`)
+        const unrelated = path.join(cacheDir, "held.old-not-a-uuid")
+        yield* Effect.promise(async () => {
+          for (const dir of [abandoned, rollback, inFlight, stalled, unrelated]) {
+            await mkdir(dir, { recursive: true })
+            await writeFile(path.join(dir, "SKILL.md"), "# Leftover")
+          }
+          const hour = new Date(Date.now() - 2 * 60 * 60 * 1000)
+          await utimes(stalled, hour, hour)
+          // Backdated on the two that must survive as well, so nothing here passes by being new.
+          await utimes(rollback, hour, hour)
+          await utimes(unrelated, hour, hour)
+        })
+
+        version = "8"
+        content = "# Eight"
+        const dirs = yield* (yield* Discovery.Service).pull(url)
+
+        expect(yield* read(dirs[0])).toBe("# Eight")
+        const left = (dir: string) => Effect.promise(() => Bun.file(path.join(dir, "SKILL.md")).exists())
+        expect(yield* left(abandoned)).toBe(false)
+        expect(yield* left(stalled)).toBe(false)
+        expect(yield* left(rollback)).toBe(true)
+        expect(yield* left(inFlight)).toBe(true)
+        // Swept by the shape the swap produces, not by anything that happens to sit beside a skill.
+        expect(yield* left(unrelated)).toBe(true)
+
+        yield* Effect.promise(() =>
+          Promise.all([rollback, inFlight, unrelated].map((dir) => rm(dir, { recursive: true, force: true }))),
+        )
       }),
     60_000,
   )

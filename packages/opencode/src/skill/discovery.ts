@@ -72,6 +72,8 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
       )
       const list = data.skills.filter((skill) => skill.files.includes("SKILL.md"))
 
+      yield* FSUtil.sweepStale(fs, cache)
+
       const dirs = yield* Effect.forEach(
         list,
         (skill) =>
