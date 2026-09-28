@@ -10,15 +10,22 @@ import { spawn } from "#pty"
 // session stays `running` for the life of the process. patches/bun-pty@0.4.8.patch defers that
 // first read past the constructor.
 //
-// What this batch is and is not. Reaching that window needs the child to finish before
-// `bun_pty_spawn` returns, so the rate follows how descheduled the parent is: measured unpatched on
-// four cores, in batches of 30, idle is 1 lost exit in 150 while three busy cores give 8 lost exits
-// and 16 lost outputs in 150. So on an idle machine an unpatched run can pass this, and a first
-// version of this comment quoted 7 in 30 as though it were the rate — it was a busy machine's.
-// What guards the patch itself is not here but deterministic: `patched-dependencies.test.ts` asserts
-// the line this patch adds is present exactly once. This batch proves the effect end to end through
-// the real shim, and covers the part no marker can — that `Pty.create` still subscribes early
-// enough — on any machine loaded enough to lose one, which CI is.
+// What this batch is and is not. Reaching that window needs the child to finish, or write, before
+// the constructor's first read, so the rate follows how descheduled the parent is — and only
+// qualitatively. Two independent measurements on four cores, unpatched, in batches of 30: single
+// figures of lost exits per 150 with the machine idle, several times that under load, and lost
+// outputs running about twice lost exits throughout. Neither of us reproduced the other's exact
+// rates, and within one run the rate fell as the load average rose, so no pair of numbers describes
+// this and earlier versions of this comment quoting some were wrong to. What does reproduce, and is
+// the whole argument that the constructor window is the mechanism rather than slowness: give the
+// child 50ms of life and lost exits go to zero in every condition, while outputs keep being lost.
+//
+// So this is a real but probabilistic guard on the deferral — an unpatched idle run still failed it
+// in roughly three batches of five — and `patched-dependencies.test.ts` holds the deterministic one,
+// asserting the added line is there exactly once. What no marker can cover is `Pty.create` still
+// subscribing in the turn that spawns, and that is not covered here either: `run()` below subscribes
+// in its own turn, mimicking that call rather than exercising it. `pty-session.test.ts` is the test
+// that goes through `Pty.create`, and it fails unpatched under load.
 const SESSIONS = 30
 const ptyTest = process.platform === "win32" ? test.skip : test
 // The descriptor count below reads /proc, which is Linux's alone.
@@ -62,6 +69,8 @@ describe("pty spawn", () => {
     async () => {
       // `kill()` was the only path that closed the handle, so a terminal left to exit by itself
       // leaked its pty — four descriptors a session, measured, with nothing left able to close them.
+      // Unlike the batch above this is deterministic: the leak is every session, not a race, so this
+      // is the guard for the patch's second hunk and it cannot pass on a quiet machine.
       // The first spawn opens the library's own descriptors, so it is not counted.
       await run("exit 0")
       const open = () => fs.readdirSync("/proc/self/fd").length

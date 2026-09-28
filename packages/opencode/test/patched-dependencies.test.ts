@@ -27,26 +27,40 @@ describe("patched dependencies", () => {
     })
   }
 
-  // A patch that stopped applying is silent; so is one applied twice, which bun can reach from a
-  // cache entry that was itself patched — it happened in a container while this was being written.
-  // The version test above sees neither case. This one is not generic on purpose: several of the
-  // AI-SDK patches add lines that already appear elsewhere in their target, so counting them would
-  // be a false alarm waiting to happen. bun-pty is where a second copy does damage — two read loops
-  // over one handle, both reaching the close the patch added — and where nothing else can see it,
-  // because duplicated output still satisfies the behavioural test in `packages/core`. It doubles as
-  // the only direct evidence that this patch is live at all, rather than inferred from a test that
-  // fails by loss rate.
+  // A patch that stopped applying is silent, and so is one applied twice — bun can reach that state
+  // from a cache entry that was itself patched, which happened in this repository's container while
+  // this was being written. The version test above sees neither case.
+  //
+  // Not generic over all twenty patches, and that is measured rather than assumed: a dozen of them
+  // add a bare `//` that their target holds dozens of times, and five add a substantial line their
+  // own target already holds elsewhere (`@ai-sdk/xai`, `mistral`, `anthropic`, `amazon-bedrock`,
+  // `@modelcontextprotocol/sdk`), so any count-based rule false-alarms on real patches.
+  //
+  // Both of bun-pty's hunks are counted, because they fail differently and are guarded differently.
+  // Without the close, a terminal that exits by itself leaks four descriptors — which
+  // `pty-spawn.test.ts` catches deterministically by counting them. Without the deferred read, a pty
+  // loses the first output of every terminal and the exit of a short-lived one, and the only
+  // behavioural guard for that is a batch whose loss rate depends on the machine's load, so for that
+  // hunk this is the guard that cannot pass by luck.
   test("bun-pty's patch is applied exactly once", async () => {
-    const marker = "queueMicrotask(() => this._startReadLoop())"
+    // Gated on the patch still being declared, so that dropping it — upstream shipping the fix —
+    // reads as the patch being gone rather than as a broken install.
+    if (!Object.keys(patched).some((key) => key.startsWith("bun-pty@"))) return
+    // The close appears once in the pristine file, in `kill()`, and twice once the patch has added
+    // its own; three would be the patch applied twice.
+    const markers = { "queueMicrotask(() => this._startReadLoop())": 1, "bun_pty_close(this.handle)": 2 }
     let checked = 0
     for (const workspace of workspaces) {
       const file = Bun.file(path.join(root, workspace, "node_modules", "bun-pty", "src", "terminal.ts"))
       if (!(await file.exists())) continue
       checked++
-      expect(
-        (await file.text()).split(marker).length - 1,
-        `${workspace} resolves a bun-pty that is not patched once`,
-      ).toBe(1)
+      const text = await file.text()
+      for (const [marker, expected] of Object.entries(markers)) {
+        expect(
+          text.split(marker).length - 1,
+          `${workspace} resolves a bun-pty holding the wrong number of \`${marker}\``,
+        ).toBe(expected)
+      }
     }
     expect(checked, "bun-pty is not installed in any workspace this test looks at").toBeGreaterThan(0)
   })

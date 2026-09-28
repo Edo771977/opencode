@@ -1,8 +1,8 @@
 diff --git a/src/terminal.ts b/src/terminal.ts
-index ec248d4..9723558 100644
+index ec248d4..08ad18d 100644
 --- a/src/terminal.ts
 +++ b/src/terminal.ts
-@@ -172,7 +172,21 @@ export class Terminal implements IPty {
+@@ -172,7 +172,25 @@ export class Terminal implements IPty {
  		if (this.handle < 0) throw new Error("PTY spawn failed");
  
  		this._pid = lib.symbols.bun_pty_get_pid(this.handle);
@@ -14,18 +14,22 @@ index ec248d4..9723558 100644
 +		// `n === -2` branch fires and then breaks, so nothing reports it again and the session stays
 +		// `running` for good), and a process that had already written lost that output.
 +		//
-+		// Reaching that window needs the child to finish, or write, before `bun_pty_spawn` returns, so
-+		// the rate follows how descheduled the parent is. Measured on this fork before the change, on
-+		// four cores, `sh -c "echo hello; exit 7"` in batches of 30: idle, 1 lost exit in 150; under
-+		// three busy cores, 8 lost exits and 16 lost outputs in 150. Give the child 50ms of life and it
-+		// is 0 lost exits in every condition, which is what says the window is the mechanism rather
-+		// than slowness. A microtask is enough to let a caller subscribe first, and the callers here
-+		// subscribe in the turn that spawns.
++		// Reaching that window needs the child to finish, or write, before the constructor's first read,
++		// so how often it happens follows how descheduled the parent is — qualitatively only. Measured on
++		// this fork before the change, on four cores, `sh -c "echo hello; exit 7"` in batches of 30:
++		// single figures of lost exits per 150 idle, several times that under load, lost outputs about
++		// twice lost exits throughout. Two independent measurements did not reproduce each other's exact
++		// rates and one saw the rate fall as the load average rose, so no pair of numbers describes this.
++		// What both saw, and what says the window rather than slowness is the mechanism: give the child
++		// 50ms of life and lost exits are zero in every condition, while outputs are still lost.
++		// A microtask is enough to let a caller subscribe first, and it is exactly enough — one hop of
++		// `await` past the spawn and events go missing again — so the callers here subscribing in the
++		// turn that spawns is load-bearing.
 +		queueMicrotask(() => this._startReadLoop());
  	}
  
  	/* ------------- accessors ------------- */
-@@ -244,6 +258,20 @@ export class Terminal implements IPty {
+@@ -244,6 +262,28 @@ export class Terminal implements IPty {
  					this._onData.fire(remaining);
  				}
  				const exitCode = lib.symbols.bun_pty_get_exit_code(this.handle);
@@ -35,12 +39,20 @@ index ec248d4..9723558 100644
 +				// session, with nothing left able to close them — the read loop has broken and
 +				// `Pty.teardown` only kills a session it still believes is running.
 +				//
-+				// Only on this branch, and before the exit is delivered. Only here, because this is the
-+				// one place the child is known to be gone: closing on the `n < 0` branch below would set
-+				// `_closing` while the child may still be alive, and `kill()` returns early when that is
-+				// set, so a later `Pty.teardown` would silently stop signalling it. Before, because a
-+				// subscriber may remove the session from inside `onExit`, which reaches `kill()` — with
-+				// `_closing` already true that is a no-op rather than a second close.
++				// Only on this branch, and before the exit is delivered.
++				//
++				// Only here because this is the one place the child is known to be gone. Closing on the
++				// `n < 0` branch below would set `_closing` while the child may still be alive, and `kill()`
++				// returns early when that is set, so a later `Pty.teardown` would stop signalling it. That
++				// branch turns out to be unreachable while the handle is valid — `bun_pty_read` returns -1
++				// only for a bad handle, a null buffer or a zero length, and a live read with nothing to
++				// give returns 0 — so this is an invariant rather than a fix for anything observed, and the
++				// descriptors that branch still leaks are out of reach in the same way.
++				//
++				// Before the exit because `fire` in interfaces.ts does not catch its listeners: one that
++				// throws would carry the exception out of the read loop and skip a close placed after it.
++				// It also spares the second `fire` the old ordering allowed, when a listener reached
++				// `kill()` on a handle nothing had closed yet.
 +				this._closing = true;
 +				lib.symbols.bun_pty_close(this.handle);
  				this._onExit.fire({ exitCode });
