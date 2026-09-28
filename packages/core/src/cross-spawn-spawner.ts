@@ -391,7 +391,24 @@ export const make = Effect.gen(function* () {
               const send = (s: NodeJS.Signals) =>
                 Effect.catch(killGroup(command, proc, s), () => killOne(command, proc, s))
               const sig = command.options.killSignal ?? "SIGTERM"
-              const attempt = send(sig).pipe(Effect.andThen(Deferred.await(signal)), Effect.asVoid)
+              // `signal` is resolved by the child's `close` event, and Node emits that only once every
+              // stdio pipe it opened has closed as well. A pipe nobody ever read never sees the EOF, so
+              // it stays open after the process itself is gone and `close` never comes. This release is
+              // uninterruptible, so waiting for it hangs the fiber for good: cancelling a shell command
+              // in the moment between the spawn and the first read of its output left the session busy
+              // until the command would have finished on its own. #44
+              //
+              // Nothing can read that output any more — the scope carrying the handle is being torn
+              // down — so the pipes are closed here rather than waited on. A child that exited normally
+              // has already ended them and destroying them again is a no-op.
+              const drop = Effect.sync(() => {
+                for (const io of proc.stdio) io?.destroy()
+              })
+              const attempt = send(sig).pipe(
+                Effect.andThen(drop),
+                Effect.andThen(Deferred.await(signal)),
+                Effect.asVoid,
+              )
               const escalated = command.options.forceKillAfter
                 ? Effect.timeoutOrElse(attempt, {
                     duration: command.options.forceKillAfter,
