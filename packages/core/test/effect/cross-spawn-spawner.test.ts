@@ -6,6 +6,7 @@ import { Effect, Exit, Stream } from "effect"
 import type * as PlatformError from "effect/PlatformError"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Shell } from "@opencode-ai/core/shell"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { testEffect } from "../lib/effect"
 
@@ -421,6 +422,97 @@ describe("cross-spawn spawner", () => {
         )
         expect(code).toBe(ChildProcessSpawner.ExitCode(0))
       }),
+    )
+  })
+  // #40, and #11 before it: on Windows `SessionPrompt.shell` burns its whole 15s wait on a
+  // `sleep 0.2`, twice at 17138ms and 17085ms — 53ms apart, which is a stop rather than a slow
+  // machine. What that failure cannot say is which step stopped, because the shell call spawns,
+  // drains the merged output and then waits for the exit code inside one fiber. These bound the
+  // three separately, in the shape that call uses (`stdin: "ignore"`, `forceKillAfter`, and the
+  // merge of stdout and stderr), so a Windows run names the step. On Linux all of them are
+  // milliseconds.
+  //
+  // Two leads this level can also settle, both deviations from the Effect spawner this file's
+  // subject was forked from: it resolves its exit on the child's `close` rather than its `exit`,
+  // and it opens Windows pipes `overlapped` where upstream never does. Either would strand a wait
+  // exactly this way.
+  describe("observing an exit the way the shell tool does", () => {
+    // `fx.live` rather than `fx.effect`: every bound below is a real-clock timeout, and the shared
+    // harness runs `effect` against a TestClock where virtual time never advances — a bound that
+    // cannot fire would hand a Windows run the suite ceiling and none of these names.
+    const bounded = <A, E, R>(
+      effect: Effect.Effect<A, E, R>,
+      message: string,
+      duration: `${number} seconds` = "10 seconds",
+    ) => effect.pipe(Effect.timeoutOrElse({ duration, orElse: () => Effect.fail(new Error(message)) }))
+
+    const drain = (handle: { all: Stream.Stream<Uint8Array, PlatformError.PlatformError> }) =>
+      Effect.gen(function* () {
+        let out = ""
+        yield* bounded(
+          Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
+            Effect.sync(() => {
+              out += chunk
+            }),
+          ),
+          "the merged output never ended",
+        )
+        return out
+      })
+
+    fx.live(
+      "ends the merged output of a child that wrote to both streams and exited",
+      Effect.gen(function* () {
+        const handle = yield* js('process.stdout.write("out"); process.stderr.write("err"); process.exit(0)', {
+          stdin: "ignore",
+          forceKillAfter: "3 seconds",
+        })
+        const out = yield* drain(handle)
+        expect(out).toContain("out")
+        expect(out).toContain("err")
+      }),
+    )
+
+    fx.live(
+      "reports the exit code once that output has been drained",
+      Effect.gen(function* () {
+        const handle = yield* js('process.stdout.write("done"); process.exit(7)', {
+          stdin: "ignore",
+          forceKillAfter: "3 seconds",
+        })
+        expect(yield* drain(handle)).toContain("done")
+        const code = yield* bounded(handle.exitCode, "the exit code never arrived after the output ended")
+        expect(code).toBe(ChildProcessSpawner.ExitCode(7))
+      }),
+    )
+
+    fx.live(
+      "reports the exit code of the preferred shell running a command",
+      Effect.gen(function* () {
+        // The shell tool's own resolution, which on Windows is whichever of pwsh, powershell, Git
+        // Bash or COMSPEC comes first, with the arguments that shell is given there. A cold shell is
+        // seconds on a loaded runner, hence the wider bound; the failure being chased is a stop.
+        const shell = Shell.preferred()
+        const handle = yield* ChildProcessSpawner.ChildProcessSpawner.use((svc) =>
+          svc.spawn(
+            ChildProcess.make(shell, Shell.args(shell, "echo opencode-shell-ok", process.cwd()), {
+              cwd: process.cwd(),
+              extendEnv: true,
+              env: { TERM: "dumb" },
+              stdin: "ignore",
+              forceKillAfter: "3 seconds",
+            }),
+          ),
+        )
+        expect(yield* drain(handle)).toContain("opencode-shell-ok")
+        const code = yield* bounded(
+          handle.exitCode,
+          `the exit code of ${shell} never arrived after the output ended`,
+          "20 seconds",
+        )
+        expect(code).toBe(ChildProcessSpawner.ExitCode(0))
+      }),
+      30_000,
     )
   })
 })

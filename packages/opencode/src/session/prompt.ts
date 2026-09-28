@@ -529,11 +529,22 @@ const layer = Layer.effect(
           const cfg = yield* config.get()
           const sh = Shell.preferred(cfg.shell)
           const args = Shell.args(sh, input.command, cwd)
+          // Which shell ran a command is not recoverable from anywhere afterwards, and on Windows it
+          // is whichever of `pwsh`, `powershell`, Git Bash or `COMSPEC` resolves first. #11 asked for
+          // this twice while diagnosing a shell that never exits there, where the whole evidence is a
+          // named wait expiring and fifteen seconds of silence.
+          yield* Effect.logInfo("running shell", { shell: sh, command: input.command, cwd })
           let output = ""
           let aborted = false
 
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
+              // Pairs with "running shell" above: between the two sit the spawn, the output drain and
+              // the wait for the exit code, so a stall shows which side of them it is on. It belongs
+              // inside this uninterruptible block rather than next to its caller, because the caller
+              // reaches that point with the interrupt of an aborted command still pending — an
+              // interruptible line there unwinds the fiber and this whole block stops running.
+              yield* Effect.logInfo("shell finished", { shell: sh, aborted, output: output.length })
               if (aborted) {
                 output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
               }
