@@ -2011,7 +2011,7 @@ unixNoLLMServer(
   "cancel interrupts loop queued behind shell",
   () =>
     Effect.gen(function* () {
-      const { prompt, chat } = yield* boot()
+      const { prompt, chat } = yield* awaitWithTimeout(boot(), "the session never booted", "10 seconds")
 
       const sh = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "sleep 30" }).pipe(Effect.forkChild)
       yield* waitForBusy(chat.id)
@@ -2019,19 +2019,27 @@ unixNoLLMServer(
       const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* Effect.sleep(50)
 
-      yield* prompt.cancel(chat.id)
+      yield* awaitWithTimeout(prompt.cancel(chat.id), "the cancel itself never returned", "5 seconds")
 
-      const exit = yield* Fiber.await(loop)
+      // Bounded and named, the treatment #28 gave the two tests above. This one fails about one run
+      // in four on four cores with nothing changed (#44), and until now it could only say that its
+      // 30s ceiling had passed: whether the loop never resumed or the cancelled shell never ended is
+      // the whole question, and the two waits are what tell them apart. Their sum stays under the
+      // ceiling so that the names win rather than race it.
+      const exit = yield* awaitWithTimeout(Fiber.await(loop), "the loop never finished after the cancel", "15 seconds")
       expect(Exit.isSuccess(exit)).toBe(true)
       if (Exit.isSuccess(exit)) {
         const tool = completedTool(exit.value.parts)
         expect(tool?.state.output).toContain("User aborted the command")
       }
 
-      yield* Fiber.await(sh)
+      yield* awaitWithTimeout(Fiber.await(sh), "the cancelled shell never exited", "10 seconds")
     }),
   { git: true, config: cfg },
-  30_000,
+  // Above the sum of the bounds inside (10 + 2 + 5 + 15 + 10), so that whichever of them expires
+  // gets to say so instead of racing the ceiling — which is what happened the first time these were
+  // added and left the failure as nameless as before.
+  60_000,
 )
 
 unixNoLLMServer(
