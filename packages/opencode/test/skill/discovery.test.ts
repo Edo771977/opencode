@@ -16,6 +16,7 @@ let mutableVersion = "1"
 let mutableContent = "# Old"
 let mutableDownloadCount = 0
 let mutableFiles = ["SKILL.md"]
+let hostile = false
 
 const fixturePath = path.join(import.meta.dir, "../fixture/skills")
 const cacheDir = path.join(Global.Path.cache, "skills")
@@ -38,6 +39,21 @@ beforeAll(async () => {
       }
       if (url.pathname === "/mutable/mutable/old.md") return new Response("old reference")
 
+      // An index that names paths of its own choosing, for #38. Every one of these is a path the
+      // runtime would otherwise join onto the cache directory.
+      if (url.pathname === "/hostile/index.json") {
+        return Response.json({
+          skills: [
+            { name: "escape", files: ["SKILL.md", "../escaped.md"] },
+            { name: "..", files: ["SKILL.md"] },
+            { name: "nested/deep", files: ["SKILL.md"] },
+            { name: "absolute", files: ["SKILL.md", "/etc/escaped-absolute.md"] },
+            { name: "encoded", files: ["SKILL.md", "%2e%2e/escaped-encoded.md"] },
+            { name: "honest", files: ["SKILL.md"] },
+          ],
+        })
+      }
+
       // route /.well-known/skills/* to the fixture directory
       if (url.pathname.startsWith("/.well-known/skills/")) {
         const filePath = url.pathname.replace("/.well-known/skills/", "")
@@ -50,6 +66,10 @@ beforeAll(async () => {
           return new Response(Bun.file(fullPath))
         }
       }
+
+      // A hostile index is only interesting if its server answers the paths it invented — including
+      // the ones that resolved off its own directory, which is what a real one would do.
+      if (hostile && url.pathname.endsWith(".md")) return new Response("# Hostile")
 
       return new Response("Not Found", { status: 404 })
     },
@@ -181,6 +201,45 @@ describe("Discovery.pull", () => {
 
       yield* discovery.pull(url)
       expect(mutableDownloadCount).toBe(3)
+    }),
+  )
+
+  // #38: every path here comes out of a document fetched over the network. `path.join` resolves a
+  // `..` without complaint and `writeWithDirs` creates whatever it needs on the way, so an index
+  // that names `../escaped.md` writes outside the skill it belongs to, and one whose `name` is `..`
+  // writes outside the skills cache entirely. The V2 runtime has checked both since it was written.
+  it.live("refuses the paths an index makes up, and keeps the honest one", () =>
+    Effect.gen(function* () {
+      yield* Effect.promise(() => rm(cacheDir, { recursive: true, force: true }))
+      const discovery = yield* Discovery.Service
+      hostile = true
+      const dirs = yield* Effect.ensuring(
+        discovery.pull(`http://localhost:${server.port}/hostile/`),
+        Effect.sync(() => {
+          hostile = false
+        }),
+      )
+
+      // Only the well-formed entry survives, and it is a directory of the cache, not below it.
+      expect(dirs).toEqual([path.join(cacheDir, "honest")])
+
+      const gone = (file: string) => Effect.promise(() => Bun.file(file).exists())
+      // Out of the skill, still inside the cache.
+      expect(yield* gone(path.join(cacheDir, "escaped.md"))).toBe(false)
+      // Out of the cache: `name` as `..` makes the skill's root the cache's own parent.
+      expect(yield* gone(path.join(Global.Path.cache, "SKILL.md"))).toBe(false)
+      // `%2e%2e` is `..` by the time the server resolves it: the write stays under the skill, the
+      // fetch does not, which is why the check decodes each segment.
+      expect(yield* gone(path.join(cacheDir, "encoded", "%2e%2e", "escaped-encoded.md"))).toBe(false)
+      // A name with a separator in it is not one directory.
+      expect(yield* gone(path.join(cacheDir, "nested", "deep", "SKILL.md"))).toBe(false)
+      // An absolute file path is not relative to anything — `path.join` would keep it under the
+      // skill, but the URL it builds is the one an index should not get to choose.
+      expect(yield* gone(path.join(cacheDir, "absolute", "etc", "escaped-absolute.md"))).toBe(false)
+      // A rejected entry takes its whole skill with it rather than landing half-written.
+      for (const name of ["escape", "absolute", "encoded", "nested"]) {
+        expect(yield* gone(path.join(cacheDir, name, "SKILL.md"))).toBe(false)
+      }
     }),
   )
 })

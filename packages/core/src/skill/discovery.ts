@@ -4,6 +4,7 @@ import path from "path"
 import { Context, Effect, Layer, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { FSUtil } from "../fs-util"
+import { SkillIndexEntry } from "./index-entry"
 import { Global } from "../global"
 import { makeGlobalNode } from "../effect/app-node"
 import { httpClient } from "../effect/app-node-platform"
@@ -11,46 +12,6 @@ import { AbsolutePath } from "../schema"
 
 const skillConcurrency = 4
 const fileConcurrency = 8
-
-function isSafeSegment(value: string) {
-  return (
-    value.length > 0 &&
-    value !== "." &&
-    value !== ".." &&
-    !value.includes("/") &&
-    !value.includes("\\") &&
-    !value.includes("\0")
-  )
-}
-
-function isSafeRelativePath(value: string) {
-  const segments = value.split("/")
-  return (
-    value.length > 0 &&
-    !value.includes("\\") &&
-    !value.includes("\0") &&
-    !value.includes("?") &&
-    !value.includes("#") &&
-    !URL.canParse(value) &&
-    !path.posix.isAbsolute(value) &&
-    !path.win32.isAbsolute(value) &&
-    segments.every((segment) => {
-      try {
-        const decoded = decodeURIComponent(segment)
-        return (
-          decoded.length > 0 &&
-          decoded !== "." &&
-          decoded !== ".." &&
-          !decoded.includes("/") &&
-          !decoded.includes("\\") &&
-          !decoded.includes("\0")
-        )
-      } catch {
-        return false
-      }
-    })
-  )
-}
 
 class IndexSkill extends Schema.Class<IndexSkill>("SkillDiscovery.IndexSkill")({
   name: Schema.String,
@@ -115,7 +76,7 @@ const layer = Layer.effect(
 
         return yield* Effect.forEach(
           data.skills.flatMap((skill) => {
-            if (!isSafeSegment(skill.name)) {
+            if (!SkillIndexEntry.isSafeSegment(skill.name)) {
               return []
             }
             if (!skill.files.includes("SKILL.md") && !skill.files.includes(`${skill.name}.md`)) {
@@ -130,7 +91,7 @@ const layer = Layer.effect(
             const skillUrl = new URL(`${encodeURIComponent(skill.name)}/`, source)
             const versionFile = path.join(root, ".opencode-version")
             const files = skill.files.map((file) => {
-              if (!isSafeRelativePath(file)) return undefined
+              if (!SkillIndexEntry.isSafeRelativePath(file)) return undefined
               let resource: URL
               try {
                 resource = new URL(file, skillUrl)
