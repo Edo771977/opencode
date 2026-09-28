@@ -94,34 +94,30 @@ const waitForOutput = (output: Queue.Queue<string>, text: string) =>
 // loudly rather than quietly.
 const EXITED_LIMIT = 25
 
-// Exercising the cap needs one more exit than it retains, and bun-pty loses an exit outright when
-// the 8ms timer it watches for one is starved: measured at roughly one short-lived session in thirty
-// under three busy cores, which is 26 chances per run and made both tests below fail six runs in ten.
-// That is #29, it is not what they cover, and serialising the spawns did not help — the loss hits a
-// session with nothing else running. So a session that goes quiet is removed and respawned, on a
-// budget: the cap is still measured on real exits, and exhausting the budget fails loudly instead of
-// waiting on a total that can no longer fall.
+// Exercising the cap needs one more exit than it retains, and those 26 short-lived sessions used to
+// be 26 chances to lose one to #29 — bun-pty firing the exit of a process that finished before
+// `spawn` returned at an emitter with no listeners yet — which failed both tests below six runs in
+// ten. They worked around it by respawning a session that went quiet, on a budget. The loss is
+// fixed in patches/bun-pty@0.4.8.patch, so the workaround is gone and a session that never reports
+// its exit fails here again. Measured on four cores: without the patch these two tests pass when the
+// machine is idle and fail 3 runs in 3 under three busy cores, which is what CI is; with it, 3 runs
+// in 3 under the same load are green.
 const EXIT_WAIT = "3 seconds"
-const RESPAWN_BUDGET = 6
 
 const createExiting = Effect.fn("PtySessionTest.createExiting")(function* (count: number) {
   const pty = yield* Pty.Service
-  let budget = RESPAWN_BUDGET
-  const exited = (id: PtyID) =>
-    Effect.gen(function* () {
-      while ((yield* pty.get(id)).status === "running") yield* Effect.sleep("5 millis")
-    }).pipe(Effect.timeout(EXIT_WAIT), Effect.isSuccess)
-
   return yield* Effect.forEach(Array.from({ length: count }), () =>
     Effect.gen(function* () {
-      while (true) {
-        const info = yield* pty.create({ command: "/bin/true", cwd: "/tmp" })
-        if (yield* exited(info.id)) return info
-        yield* pty.remove(info.id).pipe(Effect.ignore)
-        budget -= 1
-        if (budget < 0)
-          return yield* Effect.fail(new Error(`more than ${RESPAWN_BUDGET} sessions never reported an exit; see #29`))
-      }
+      const info = yield* pty.create({ command: "/bin/true", cwd: "/tmp" })
+      yield* Effect.gen(function* () {
+        while ((yield* pty.get(info.id)).status === "running") yield* Effect.sleep("5 millis")
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: EXIT_WAIT,
+          orElse: () => Effect.fail(new Error(`session ${info.id} never reported an exit`)),
+        }),
+      )
+      return info
     }),
   )
 })

@@ -1,0 +1,40 @@
+diff --git a/src/terminal.ts b/src/terminal.ts
+index ec248d4..9affecc 100644
+--- a/src/terminal.ts
++++ b/src/terminal.ts
+@@ -172,7 +172,17 @@ export class Terminal implements IPty {
+ 		if (this.handle < 0) throw new Error("PTY spawn failed");
+ 
+ 		this._pid = lib.symbols.bun_pty_get_pid(this.handle);
+-		this._startReadLoop();
++		// The first `bun_pty_read` used to run right here, inside the constructor: `_startReadLoop` is
++		// async but has nothing to await before that read, so it happened before `spawn` returned and
++		// anything it produced was fired at an emitter whose listener list was still empty — and this
++		// emitter keeps nothing for latecomers. A process that had already finished lost its exit (the
++		// `n === -2` branch fires and then breaks, so nothing reports it again and the session stays
++		// `running` for good), and a process that had already written lost that output.
++		// Measured on this fork before the change, 30 runs each of `sh -c "echo hello; exit 7"`:
++		// 7 lost the exit and 8 lost the output; with 50ms of life before exiting, 0 lost the exit and
++		// 13 still lost the output. A microtask is enough to let a caller subscribe first, and the
++		// callers here subscribe in the turn that spawns.
++		queueMicrotask(() => this._startReadLoop());
+ 	}
+ 
+ 	/* ------------- accessors ------------- */
+@@ -258,5 +268,16 @@ export class Terminal implements IPty {
+ 				await new Promise((r) => setTimeout(r, 8));
+ 			}
+ 		}
++
++		// The loop is only ever left when this pty is finished with: the child exited, a read failed, or
++		// `kill()` set `_closing` — and `kill()` was the only path that closed the handle. So a terminal
++		// that ended on its own leaked its pty: measured on this fork, 20 sequential `sh -c "exit 7"`
++		// sessions left 80 file descriptors open, 4 per session, with nothing left able to close them.
++		// A long-lived process that opens terminals reaches its descriptor limit that way, and reads
++		// then fail — which is the `n < 0` branch above, where exits stop being delivered at all.
++		if (!this._closing) {
++			this._closing = true;
++			lib.symbols.bun_pty_close(this.handle);
++		}
+ 	}
+ }
