@@ -99,9 +99,9 @@ const EXITED_LIMIT = 25
 // `spawn` returned at an emitter with no listeners yet — which failed both tests below six runs in
 // ten. They worked around it by respawning a session that went quiet, on a budget. The loss is
 // fixed in patches/bun-pty@0.4.8.patch, so the workaround is gone and a session that never reports
-// its exit fails here again. Measured on four cores: without the patch these two tests pass when the
-// machine is idle and fail 3 runs in 3 under three busy cores, which is what CI is; with it, 3 runs
-// in 3 under the same load are green.
+// its exit fails here again. Measured on four cores: without the patch they pass on an idle machine
+// and fail under load but not every time — 3 runs in 3 in one measurement and 3 of 8 in a second,
+// so call it half. With the patch, 14 runs in 14 under three and eight busy cores are green.
 const EXIT_WAIT = "3 seconds"
 
 const createExiting = Effect.fn("PtySessionTest.createExiting")(function* (count: number) {

@@ -8,7 +8,8 @@ jobs:
   check-duplicates:
     # `OPENCODE_API_KEY` belongs to the upstream account, so on a fork every one of these steps runs
     # — checkout, install, the opencode install script — to reach a reporter that cannot answer. The
-    # same guard the rest of this repository's secret-dependent jobs carry.
+    # guard thirteen other jobs across ten workflows already carry, though not every job that reads
+    # this secret: `triage.yml` and `duplicate-issues.yml` still spend a fork's minutes the same way.
     if: github.repository == 'anomalyco/opencode'
     runs-on: ubuntu-latest
     permissions:
@@ -72,7 +73,7 @@ jobs:
           # Empty output is not a report of no duplicates, and empty is what a missing key, a network
           # error or a model that answered nothing all look like. Annotated rather than posted, so it
           # is visible on the run instead of under a preamble on someone's pull request.
-          if [ -z "$COMMENT" ]; then
+          if [ -z "${COMMENT//[[:space:]]/}" ]; then
             echo "::warning::duplicate-pr.ts returned no output; posting nothing. Is OPENCODE_API_KEY set?"
           elif [ "$COMMENT" != "No duplicate PRs found" ]; then
             gh pr comment "$PR_NUMBER" --body "_The following comment was made by an LLM, it may be inaccurate:_

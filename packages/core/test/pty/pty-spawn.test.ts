@@ -8,8 +8,17 @@ import { spawn } from "#pty"
 // or wrote, before `spawn` returned fired at an emitter nobody could have subscribed to yet. A lost
 // exit strands the session: the loop breaks after firing it, so nothing reports it again and the
 // session stays `running` for the life of the process. patches/bun-pty@0.4.8.patch defers that
-// first read past the constructor. These run a batch because the loss was frequent, not certain:
-// 7 exits and 8 outputs in 30 before the patch, 0 and 0 after.
+// first read past the constructor.
+//
+// What this batch is and is not. Reaching that window needs the child to finish before
+// `bun_pty_spawn` returns, so the rate follows how descheduled the parent is: measured unpatched on
+// four cores, in batches of 30, idle is 1 lost exit in 150 while three busy cores give 8 lost exits
+// and 16 lost outputs in 150. So on an idle machine an unpatched run can pass this, and a first
+// version of this comment quoted 7 in 30 as though it were the rate — it was a busy machine's.
+// What guards the patch itself is not here but deterministic: `patched-dependencies.test.ts` asserts
+// the line this patch adds is present exactly once. This batch proves the effect end to end through
+// the real shim, and covers the part no marker can — that `Pty.create` still subscribes early
+// enough — on any machine loaded enough to lose one, which CI is.
 const SESSIONS = 30
 const ptyTest = process.platform === "win32" ? test.skip : test
 // The descriptor count below reads /proc, which is Linux's alone.

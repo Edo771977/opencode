@@ -185,16 +185,26 @@ describe("Discovery.pull under a refused swap", () => {
         // mtime is its own, because staging directories are made here rather than moved.
         const stalled = path.join(cacheDir, `held.tmp-${crypto.randomUUID()}`)
         const unrelated = path.join(cacheDir, "held.old-not-a-uuid")
+        // A backup whose name is answered by a plain file rather than by the cached directory. The
+        // rule is about a swap, and a swap only moves directories, so a file at `<name>` is not
+        // `<name>` back in place — reading it as one sweeps a backup that is still the only copy.
+        const shadowed = path.join(cacheDir, `pinned.old-${crypto.randomUUID()}`)
+        const fileShaped = path.join(cacheDir, `held.old-${crypto.randomUUID()}`)
         yield* Effect.promise(async () => {
-          for (const dir of [abandoned, rollback, inFlight, stalled, unrelated]) {
+          for (const dir of [abandoned, rollback, inFlight, stalled, unrelated, shadowed]) {
             await mkdir(dir, { recursive: true })
             await writeFile(path.join(dir, "SKILL.md"), "# Leftover")
           }
+          await writeFile(path.join(cacheDir, "pinned"), "not a directory")
+          // Right shape, wrong kind: the swap never leaves a file behind, so this is somebody else's
+          // and not ours to delete.
+          await writeFile(fileShaped, "not a directory either")
           const hour = new Date(Date.now() - 2 * 60 * 60 * 1000)
           await utimes(stalled, hour, hour)
-          // Backdated on the two that must survive as well, so nothing here passes by being new.
+          // Backdated on the three that must survive as well, so nothing here passes by being new.
           await utimes(rollback, hour, hour)
           await utimes(unrelated, hour, hour)
+          await utimes(shadowed, hour, hour)
         })
 
         version = "8"
@@ -209,9 +219,15 @@ describe("Discovery.pull under a refused swap", () => {
         expect(yield* left(inFlight)).toBe(true)
         // Swept by the shape the swap produces, not by anything that happens to sit beside a skill.
         expect(yield* left(unrelated)).toBe(true)
+        expect(yield* left(shadowed)).toBe(true)
+        expect(yield* Effect.promise(() => Bun.file(fileShaped).exists())).toBe(true)
 
         yield* Effect.promise(() =>
-          Promise.all([rollback, inFlight, unrelated].map((dir) => rm(dir, { recursive: true, force: true }))),
+          Promise.all(
+            [rollback, inFlight, unrelated, shadowed, fileShaped, path.join(cacheDir, "pinned")].map((entry) =>
+              rm(entry, { recursive: true, force: true }),
+            ),
+          ),
         )
       }),
     60_000,
