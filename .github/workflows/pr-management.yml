@@ -65,7 +65,13 @@ jobs:
         run: |
           COMMENT=$(bun script/duplicate-pr.ts -f pr_info.txt "Check the attached file for PR details and search for duplicates")
 
-          if [ "$COMMENT" != "No duplicate PRs found" ]; then
+          # An empty result is not a duplicate report. Testing only for the no-duplicates answer let
+          # every way of coming back with nothing — no API key, a network error, a model that
+          # returned nothing — post the preamble with no comment under it, and say so on every pull
+          # request while the check itself looked green. Said in the log instead.
+          if [ -z "$COMMENT" ]; then
+            echo "duplicate-pr.ts returned no output; posting nothing. Is OPENCODE_API_KEY set?" >&2
+          elif [ "$COMMENT" != "No duplicate PRs found" ]; then
             gh pr comment "$PR_NUMBER" --body "_The following comment was made by an LLM, it may be inaccurate:_
 
           $COMMENT"
