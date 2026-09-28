@@ -252,6 +252,45 @@ export namespace FSUtil {
   export const retryWhileHeld = <A, R>(effect: Effect.Effect<A, PlatformError, R>) =>
     effect.pipe(Effect.retry({ while: held, schedule: heldSchedule }))
 
+  // A swap that cannot delete what it moved aside leaves `<name>.old-<uuid>` behind, and a refresh
+  // that dies mid-download leaves `<name>.tmp-<uuid>`. Both of those deletes are ignored where they
+  // happen, for reasons that hold — failing the swap for a refused delete would retry one that has
+  // already landed, and failing the refresh would bury the error that matters — but nothing then
+  // collected them, so each refused delete left a full copy of a skill in the cache for good.
+  // Collected on the next pass instead, and only once an entry is an hour old: a refresh running
+  // concurrently, in this process or another, has directories seconds old, so it is never the one
+  // swept. A refusal here is ignored in turn, because the next pass comes round again.
+  const STALE_SUFFIX = /\.(old|tmp)-[0-9a-f-]{36}$/
+  const STALE_AGE_MS = 60 * 60 * 1000
+
+  export const sweepStale = (fs: Interface, directory: string) =>
+    Effect.gen(function* () {
+      const entries = yield* fs.readDirectoryEntries(directory).pipe(Effect.orElseSucceed(() => [] as DirEntry[]))
+      const stale = yield* Effect.promise(async () => {
+        const cutoff = Date.now() - STALE_AGE_MS
+        const candidates = entries
+          .filter((entry) => STALE_SUFFIX.test(entry.name))
+          .map((entry) => join(directory, entry.name))
+        const modified = await Promise.all(
+          candidates.map((target) =>
+            NFS.stat(target)
+              .then((info) => info.mtimeMs)
+              .catch(() => Infinity),
+          ),
+        )
+        return candidates.filter((_, index) => (modified[index] ?? Infinity) < cutoff)
+      })
+      if (stale.length === 0) return
+      yield* Effect.logInfo("sweeping abandoned skill directories", { directory, count: stale.length })
+      yield* Effect.forEach(
+        stale,
+        (target) => fs.remove(target, { recursive: true, force: true }).pipe(Effect.ignore),
+        {
+          discard: true,
+        },
+      )
+    })
+
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {
     return lookup(p) || "application/octet-stream"

@@ -7,7 +7,7 @@ import { Global } from "@opencode-ai/core/global"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Effect, FileSystem, Layer } from "effect"
 import { systemError } from "effect/PlatformError"
-import { rm } from "fs/promises"
+import { mkdir, rm, utimes, writeFile } from "fs/promises"
 import path from "path"
 import { Discovery } from "../../src/skill/discovery"
 import { testEffect } from "../lib/effect"
@@ -162,6 +162,45 @@ describe("Discovery.pull under a refused swap", () => {
         expect(yield* read(dirs[0])).toBe("# Five")
 
         refuse = () => false
+      }),
+    60_000,
+  )
+
+  it.live(
+    "sweeps the copies a refused delete left behind, and leaves a running refresh alone",
+    () =>
+      Effect.gen(function* () {
+        yield* publish("7", "# Seven")
+
+        // What a refused `remove` leaves: the cached copy moved aside and never collected. The name
+        // has to match what the swap produces, uuid and all, or the sweep would be measuring nothing.
+        const abandoned = path.join(cacheDir, `held.old-${crypto.randomUUID()}`)
+        const inFlight = path.join(cacheDir, `held.tmp-${crypto.randomUUID()}`)
+        const unrelated = path.join(cacheDir, "held.old-not-a-uuid")
+        yield* Effect.promise(async () => {
+          for (const dir of [abandoned, inFlight, unrelated]) {
+            await mkdir(dir, { recursive: true })
+            await writeFile(path.join(dir, "SKILL.md"), "# Leftover")
+          }
+          // Only the abandoned one is old. A refresh running right now — in this process or another
+          // opencode — has directories seconds old, and must survive.
+          const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
+          await utimes(abandoned, old, old)
+          await utimes(unrelated, old, old)
+        })
+
+        version = "8"
+        content = "# Eight"
+        const dirs = yield* (yield* Discovery.Service).pull(url)
+
+        expect(yield* read(dirs[0])).toBe("# Eight")
+        expect(yield* Effect.promise(() => Bun.file(path.join(abandoned, "SKILL.md")).exists())).toBe(false)
+        expect(yield* Effect.promise(() => Bun.file(path.join(inFlight, "SKILL.md")).exists())).toBe(true)
+        // Swept by suffix, not by anything that happens to sit next to a skill.
+        expect(yield* Effect.promise(() => Bun.file(path.join(unrelated, "SKILL.md")).exists())).toBe(true)
+
+        yield* Effect.promise(() => rm(inFlight, { recursive: true, force: true }))
+        yield* Effect.promise(() => rm(unrelated, { recursive: true, force: true }))
       }),
     60_000,
   )

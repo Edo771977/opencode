@@ -111,6 +111,8 @@ const layer = Layer.effect(
         if (!data) return []
 
         const sourceRoot = path.resolve(global.cache, "skills", Bun.hash(base).toString(16))
+        yield* FSUtil.sweepStale(fs, sourceRoot)
+
         return yield* Effect.forEach(
           data.skills.flatMap((skill) => {
             if (!isSafeSegment(skill.name)) {
