@@ -521,5 +521,69 @@ describe("cross-spawn spawner", () => {
       // ceiling and reports `timed out after 30000ms`, which is the message these exist to avoid.
       45_000,
     )
+
+    // The test above reports that the merge of the two streams stalled; this reports which half, by
+    // draining the sides separately with a bound each. The merge ends only once both sides have, so
+    // the three cases #40 has been unable to tell apart read differently here: one side alone fails
+    // and names itself, both fail if the child is holding its handles, and both passing while the
+    // merged drain stalls puts the fault in the merge rather than in either pipe. Each bound also
+    // reports whether the child's pid is still there, because a pipe left open by a process that is
+    // gone and one held by a process still running want different fixes.
+    //
+    // Drained concurrently and not one after the other: Windows opens these `overlapped`, where a
+    // reader that stops reading can block the pipe, so reading one to its end while the other waits
+    // would be a stall this test caused rather than one it found.
+    fx.live(
+      "names which of the preferred shell's streams never ends",
+      Effect.gen(function* () {
+        const shell = Shell.preferred()
+        const handle = yield* ChildProcessSpawner.ChildProcessSpawner.use((svc) =>
+          svc.spawn(
+            ChildProcess.make(shell, Shell.args(shell, "echo opencode-shell-ok", process.cwd()), {
+              cwd: process.cwd(),
+              extendEnv: true,
+              env: { TERM: "dumb" },
+              stdin: "ignore",
+              forceKillAfter: "3 seconds",
+            }),
+          ),
+        )
+        // Not `handle.isRunning`, which is `!Deferred.isDone(signal)` and so reports whether `close`
+        // has fired — the very thing that has not, whenever this bound fires, so it would read
+        // "alive" in every failure and distinguish nothing. Signal 0 checks for the pid instead,
+        // which both platforms answer. It cannot tell a zombie from a live process, but a child of
+        // this test is reaped by node, so a pid still present here means the process really is.
+        const present = () => {
+          try {
+            process.kill(handle.pid, 0)
+            return true
+          } catch {
+            return false
+          }
+        }
+        const side = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>, which: string) =>
+          Stream.runDrain(stream).pipe(
+            Effect.timeoutOrElse({
+              duration: "10 seconds",
+              orElse: () =>
+                Effect.fail(
+                  new Error(
+                    `the ${which} of ${shell} never ended, and pid ${handle.pid} is ${present() ? "still there" : "gone"}`,
+                  ),
+                ),
+            }),
+          )
+        yield* Effect.all([side(handle.stdout, "stdout"), side(handle.stderr, "stderr")], {
+          concurrency: "unbounded",
+        })
+        const code = yield* bounded(
+          handle.exitCode,
+          `the exit code of ${shell} never arrived after both of its streams ended`,
+          "20 seconds",
+        )
+        expect(code).toBe(ChildProcessSpawner.ExitCode(0))
+      }),
+      45_000,
+    )
   })
 })
