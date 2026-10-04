@@ -7,7 +7,11 @@ import path from "path"
 // silently loses whatever the patch fixed. This pins the two together for the
 // packages that ship in the CLI.
 const root = path.resolve(import.meta.dir, "../../..")
-const workspaces = ["packages/opencode", "packages/core"]
+// Every place a patched dependency can land: under each workspace with the isolated layout bun
+// uses by default, and at the root under `--linker hoisted`, which CI passes on Windows. Looking
+// in only one layout's places makes this report "not installed" under the other, which is how the
+// hoisted job found it.
+const locations = ["packages/opencode", "packages/core", "."]
 const patched = (await Bun.file(path.join(root, "package.json")).json()).patchedDependencies as Record<string, string>
 
 describe("patched dependencies", () => {
@@ -18,11 +22,14 @@ describe("patched dependencies", () => {
 
     test(`${key} matches the installed version`, async () => {
       expect(await Bun.file(path.join(root, patched[key])).exists()).toBe(true)
-      for (const workspace of workspaces) {
-        const file = Bun.file(path.join(root, workspace, "node_modules", name, "package.json"))
+      for (const location of locations) {
+        const file = Bun.file(path.join(root, location, "node_modules", name, "package.json"))
         if (!(await file.exists())) continue
         const installed = (await file.json()).version as string
-        expect(installed, `${workspace} resolves ${name}@${installed}; patch is for ${version}`).toBe(version)
+        expect(
+          installed,
+          `${location}/node_modules resolves ${name}@${installed}; patch is for ${version}`,
+        ).toBe(version)
       }
     })
   }
@@ -50,18 +57,18 @@ describe("patched dependencies", () => {
     // its own; three would be the patch applied twice.
     const markers = { "queueMicrotask(() => this._startReadLoop())": 1, "bun_pty_close(this.handle)": 2 }
     let checked = 0
-    for (const workspace of workspaces) {
-      const file = Bun.file(path.join(root, workspace, "node_modules", "bun-pty", "src", "terminal.ts"))
+    for (const location of locations) {
+      const file = Bun.file(path.join(root, location, "node_modules", "bun-pty", "src", "terminal.ts"))
       if (!(await file.exists())) continue
       checked++
       const text = await file.text()
       for (const [marker, expected] of Object.entries(markers)) {
         expect(
           text.split(marker).length - 1,
-          `${workspace} resolves a bun-pty holding the wrong number of \`${marker}\``,
+          `${location}/node_modules holds a bun-pty with the wrong number of \`${marker}\``,
         ).toBe(expected)
       }
     }
-    expect(checked, "bun-pty is not installed in any workspace this test looks at").toBeGreaterThan(0)
+    expect(checked, "bun-pty is not installed in any location this test looks at").toBeGreaterThan(0)
   })
 })

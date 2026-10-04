@@ -58,16 +58,12 @@ runs:
       shell: bash
 
     - name: Install dependencies
-      # Hoisted only on Windows, and this is an experiment, not a belief: the merge that took
-      # upstream's plain `bun install` also dropped this flag, and `unit (windows)` went from green
-      # to 11 and 14 failures in two runs — every one a CLI subprocess timing out at 15s waiting for
-      # `opencode serve`. The suite's own duration did not change (1354s green, 1367s and 1378s red),
-      # while the install grew from 301s to ~348s, so what got more expensive is resolution, not the
-      # runner. An isolated layout resolves through far more junctions on Windows than a hoisted one.
-      # The other Windows-only variable the same merge introduced is upstream's pin to Bun 1.4.2
-      # above, which stays either way: it fixes the patched-peer rename, a different problem. If this
-      # flag turns the job green the layout was the cause and this comment can shrink to one line; if
-      # the job stays red, the pin is next and this flag should come back out.
+      # Hoisted on Windows, measured rather than assumed: dropping this flag cost `unit (windows)`
+      # 11 failures on one run and 14 on the next, every one a CLI subprocess timing out at 15s
+      # waiting for `opencode serve`, while the suite's own duration and the other three jobs did
+      # not move. An isolated layout resolves through far more junctions there, which costs a
+      # process launch without costing the tests. Upstream's Bun 1.4.2 pin above is a separate fix,
+      # for the patched-peer rename, and stays either way.
       run: |
         if [ "$RUNNER_OS" = "Windows" ]; then
           bun install --linker hoisted ${{ inputs.install-flags }}
