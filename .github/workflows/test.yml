@@ -91,6 +91,12 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 10
         working-directory: packages/opencode
+        # Both stalls so far printed a header and nothing else, which told us nothing: the per-scenario
+        # line is opt-in and was off here, so the loop is silent either way. With these on, the ten
+        # minutes above end in a log that names the scenario and the phase it stopped in.
+        env:
+          OPENCODE_EXERCISE_PROGRESS: "1"
+          OPENCODE_EXERCISE_TRACE: "1"
         run: bun run test:httpapi
 
   e2e:

@@ -50,8 +50,12 @@ export function parseOptions(args: string[]): Options {
     failOnMissing: args.includes("--fail-on-missing"),
     failOnSkip: args.includes("--fail-on-skip"),
     scenarioTimeout: parseScenarioTimeout(option(args, "--scenario-timeout") ?? "30 seconds"),
-    progress: args.includes("--progress"),
-    trace: args.includes("--trace"),
+    // Also from the environment, because CI runs the three modes through one `test:httpapi` script
+    // and cannot append a flag to each. Both stayed off there, which is why #22's two stalls produced
+    // a header and then nothing at all: with `progress` off nothing is printed between the header and
+    // the summary, whatever the loop is doing, so the silence says nothing about where it stopped.
+    progress: args.includes("--progress") || process.env.OPENCODE_EXERCISE_PROGRESS === "1",
+    trace: args.includes("--trace") || process.env.OPENCODE_EXERCISE_TRACE === "1",
   }
 }
 

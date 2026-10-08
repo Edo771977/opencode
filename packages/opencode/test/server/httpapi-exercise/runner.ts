@@ -24,7 +24,20 @@ export function runScenario(options: Options) {
       }),
       Effect.as({ status: "pass", scenario } as Result),
       Effect.catchCause((cause) => Effect.succeed({ status: "fail" as const, scenario, message: Cause.pretty(cause) })),
+      // `Effect.scoped` sits outside the bound above, so a scenario's teardown — its finalizers, the
+      // apps it disposes, the servers it closes — runs with no ceiling at all. #22's own evidence
+      // points there: two orphan `bun` processes at job cleanup, and a local reproduction that
+      // stalled after `summary pass=208` rather than during the scenarios. These two lines are the
+      // discriminator, and they are placed either side of that boundary deliberately: a trace ending
+      // at `teardown start` says the finalizers are what hangs, one ending at `expect done` says the
+      // body is, and `teardown done` on every scenario clears teardown entirely.
+      //
+      // The ordering is left as it is for now. Moving the bound outside the scope looks like the fix
+      // and may not be one: if the stall is an uninterruptible wait, a timeout cannot end it and would
+      // swallow its own message instead, which is #46 measured on a different path.
+      Effect.tap(() => trace(options, scenario, "teardown start")),
       Effect.scoped,
+      Effect.tap(() => trace(options, scenario, "teardown done")),
     )
   }
 }
