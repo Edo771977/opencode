@@ -463,6 +463,22 @@ describe("cross-spawn spawner", () => {
         return out
       })
 
+    // The shell tool's own resolution and arguments, with the `stdin: "ignore"` and `forceKillAfter`
+    // that call passes. Three tests below spawn it, and the shape is the thing under test, so it is
+    // written once rather than copied a third time.
+    const shellHandle = (shell: string) =>
+      ChildProcessSpawner.ChildProcessSpawner.use((svc) =>
+        svc.spawn(
+          ChildProcess.make(shell, Shell.args(shell, "echo opencode-shell-ok", process.cwd()), {
+            cwd: process.cwd(),
+            extendEnv: true,
+            env: { TERM: "dumb" },
+            stdin: "ignore",
+            forceKillAfter: "3 seconds",
+          }),
+        ),
+      )
+
     fx.live(
       "ends the merged output of a child that wrote to both streams and exited",
       Effect.gen(function* () {
@@ -498,17 +514,7 @@ describe("cross-spawn spawner", () => {
         // Bash or COMSPEC comes first, with the arguments that shell is given there. A cold shell is
         // seconds on a loaded runner, hence the wider bound; the failure being chased is a stop.
         const shell = Shell.preferred()
-        const handle = yield* ChildProcessSpawner.ChildProcessSpawner.use((svc) =>
-          svc.spawn(
-            ChildProcess.make(shell, Shell.args(shell, "echo opencode-shell-ok", process.cwd()), {
-              cwd: process.cwd(),
-              extendEnv: true,
-              env: { TERM: "dumb" },
-              stdin: "ignore",
-              forceKillAfter: "3 seconds",
-            }),
-          ),
-        )
+        const handle = yield* shellHandle(shell)
         expect(yield* drain(handle, shell)).toContain("opencode-shell-ok")
         const code = yield* bounded(
           handle.exitCode,
@@ -537,30 +543,12 @@ describe("cross-spawn spawner", () => {
       "names which of the preferred shell's streams never ends",
       Effect.gen(function* () {
         const shell = Shell.preferred()
-        const handle = yield* ChildProcessSpawner.ChildProcessSpawner.use((svc) =>
-          svc.spawn(
-            ChildProcess.make(shell, Shell.args(shell, "echo opencode-shell-ok", process.cwd()), {
-              cwd: process.cwd(),
-              extendEnv: true,
-              env: { TERM: "dumb" },
-              stdin: "ignore",
-              forceKillAfter: "3 seconds",
-            }),
-          ),
-        )
+        const handle = yield* shellHandle(shell)
         // Not `handle.isRunning`, which is `!Deferred.isDone(signal)` and so reports whether `close`
         // has fired — the very thing that has not, whenever this bound fires, so it would read
         // "alive" in every failure and distinguish nothing. Signal 0 checks for the pid instead,
         // which both platforms answer. It cannot tell a zombie from a live process, but a child of
         // this test is reaped by node, so a pid still present here means the process really is.
-        const present = () => {
-          try {
-            process.kill(handle.pid, 0)
-            return true
-          } catch {
-            return false
-          }
-        }
         const side = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>, which: string) =>
           Stream.runDrain(stream).pipe(
             Effect.timeoutOrElse({
@@ -568,7 +556,7 @@ describe("cross-spawn spawner", () => {
               orElse: () =>
                 Effect.fail(
                   new Error(
-                    `the ${which} of ${shell} never ended, and pid ${handle.pid} is ${present() ? "still there" : "gone"}`,
+                    `the ${which} of ${shell} never ended, and pid ${handle.pid} is ${alive(handle.pid) ? "still there" : "gone"}`,
                   ),
                 ),
             }),
@@ -584,6 +572,60 @@ describe("cross-spawn spawner", () => {
         expect(code).toBe(ChildProcessSpawner.ExitCode(0))
       }),
       45_000,
+    )
+
+    // The test above has never once fired: #40 shows up in roughly one `unit (windows)` job in four,
+    // and a single spawn per run mostly catches nothing, so the side that stalls is still unnamed and
+    // waiting for a starved runner is not a plan. This runs the same shape ATTEMPTS times in a row and
+    // bounds each side of each attempt, so one job puts the race under load dozens of times instead of
+    // once. The message carries the attempt number because "attempt 1" and "attempt 37" are different
+    // findings: the first is a cold start, the second a race that needs repetition to show.
+    //
+    // Sequential, one child at a time, and each in its own scope: that is the shape the shell tool
+    // uses, and forty concurrent shells on a two-core runner would be a stall this test manufactured
+    // rather than one it found.
+    const ATTEMPTS = 40
+
+    fx.live(
+      "ends both of the preferred shell's streams on each of forty consecutive spawns",
+      Effect.gen(function* () {
+        const shell = Shell.preferred()
+        yield* Effect.forEach(
+          Array.from({ length: ATTEMPTS }, (_, i) => i + 1),
+          (attempt) =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const handle = yield* shellHandle(shell)
+                const side = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>, which: string) =>
+                  Stream.runDrain(stream).pipe(
+                    Effect.timeoutOrElse({
+                      duration: "10 seconds",
+                      orElse: () =>
+                        Effect.fail(
+                          new Error(
+                            `the ${which} of ${shell} never ended on attempt ${attempt} of ${ATTEMPTS}, and pid ${handle.pid} is ${alive(handle.pid) ? "still there" : "gone"}`,
+                          ),
+                        ),
+                    }),
+                  )
+                yield* Effect.all([side(handle.stdout, "stdout"), side(handle.stderr, "stderr")], {
+                  concurrency: "unbounded",
+                })
+                expect(
+                  yield* bounded(
+                    handle.exitCode,
+                    `the exit code of ${shell} never arrived on attempt ${attempt} of ${ATTEMPTS}`,
+                  ),
+                ).toBe(ChildProcessSpawner.ExitCode(0))
+              }),
+            ),
+          { discard: true },
+        )
+      }),
+      // Forty shells, not one: generous because a loaded Windows runner pays a few hundred milliseconds
+      // of shell startup each time. A stall still fails at its own bound in ten seconds, so this
+      // ceiling only has to cover the healthy path.
+      240_000,
     )
   })
 })
