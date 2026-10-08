@@ -49,6 +49,19 @@ function fromBunStream(name: string, get: () => ReadableStream<Uint8Array>) {
 // chunk, push to a tail buffer, swallow stream errors (the child closing the
 // pipe is normal). `log: true` surfaces a real protocol error to logs so a
 // regression doesn't silently disappear.
+// How long a freshly spawned CLI child may take to become able to answer at all, as opposed to how
+// long an answer may take once it can. The two were one number until #47, where that cost two weeks:
+// widening the shared bound from 5s to 15s in `58dfb7fb41` held until a loaded Windows runner spent
+// 6892ms reaching the command's own first line and had not finished `Server.listen` eight seconds
+// later, with one child producing no output at all inside fifteen seconds. Startup also varies by
+// more than 2x on an idle machine — measured at 2.1s and 4.5s for the same command — so a budget
+// close to the observed cost is a budget that fires on load.
+//
+// Thirty seconds, which is twice the number seen failing and still half the 60s per-test ceiling: a
+// genuine hang has to report through the waits that carry this, with the child's stderr attached,
+// rather than through a ceiling that prints none of it.
+export const childStartup = Duration.seconds(30)
+
 function forkStderrDrain(stream: ReadableStream<Uint8Array>, into: string[]) {
   return Effect.forkScoped(
     fromBunStream("stderr", () => stream).pipe(
@@ -364,7 +377,9 @@ export function withCliFixture<A, E>(
         ),
       )
 
-      const readyTimeoutMs = opts?.readyTimeoutMs ?? 15_000
+      // The same quantity as above, for the same child: `serve` carried its own 15s for readiness,
+      // which the #47 measurements make just as tight. Callers can still pass their own.
+      const readyTimeoutMs = opts?.readyTimeoutMs ?? Duration.toMillis(childStartup)
       const match = yield* Deferred.await(readyDeferred).pipe(
         Effect.timeoutOrElse({
           duration: Duration.millis(readyTimeoutMs),

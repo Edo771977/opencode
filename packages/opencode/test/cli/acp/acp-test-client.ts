@@ -1,7 +1,7 @@
 import { expect } from "bun:test"
 import type { SessionConfigOption, SessionConfigSelectOption } from "@agentclientprotocol/sdk"
 import { Duration, Effect } from "effect"
-import type { AcpHandle } from "../../lib/cli-process"
+import { childStartup, type AcpHandle } from "../../lib/cli-process"
 
 type JsonRpcRequest = {
   readonly jsonrpc: "2.0"
@@ -34,7 +34,11 @@ export type AcpClient = {
 }
 
 export function createAcpClient(acp: AcpHandle): AcpClient {
-  const state = { nextId: 1 }
+  // `ready` flips on the first thing the child says, whatever it is. Until then a wait is measuring
+  // the child's cold start as well as the exchange, and those are different quantities with different
+  // budgets (#47) — which is why the steady-state bound below stays where it was. Raising both would
+  // only hide the protocol regression the 15s one exists to catch.
+  const state = { nextId: 1, ready: false }
 
   // #47: both waits below used to fail as a bare Effect `TimeoutError`, which cannot tell a child
   // that is slow to start from one that is wedged — and the auth test that misses this bound on
@@ -43,10 +47,19 @@ export function createAcpClient(acp: AcpHandle): AcpClient {
   const awaiting = <A, E>(effect: Effect.Effect<A, E>, what: string, duration: Duration.Duration) =>
     effect.pipe(
       Effect.timeoutOrElse({
-        duration,
+        duration: state.ready ? duration : childStartup,
         orElse: () =>
-          Effect.fail(new Error(`waiting for ${what} from the acp child timed out; its stderr:\n${acp.stderr()}`)),
+          Effect.fail(
+            new Error(
+              `waiting for ${what} from the acp child timed out${state.ready ? "" : ", and it had not spoken yet"}; its stderr:\n${acp.stderr()}`,
+            ),
+          ),
       }),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          state.ready = true
+        }),
+      ),
     )
 
   const request = <T>(method: string, params?: unknown) =>

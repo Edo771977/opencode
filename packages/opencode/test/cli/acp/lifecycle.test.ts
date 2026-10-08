@@ -5,8 +5,8 @@ import type {
   LoadSessionResponse,
   ResumeSessionResponse,
 } from "@agentclientprotocol/sdk"
-import { Duration, Effect } from "effect"
-import { cliIt } from "../../lib/cli-process"
+import { Effect } from "effect"
+import { childStartup, cliIt } from "../../lib/cli-process"
 import { expectOk, selectConfigOption } from "./acp-test-client"
 import { createAcpClient, initialize, newSession, verifierConfig } from "./helpers"
 
@@ -18,14 +18,14 @@ describe("opencode acp lifecycle subprocess", () => {
         const acp = yield* opencode.acp()
         acp.close()
 
-        // #47: this bound was already widened once, from 5s to 15s in `58dfb7fb41`, and on Windows it
-        // is missed again. A bare `TimeoutError` cannot say why, so it reports the child's own
-        // `[acp-profile]` marks instead: `stdin.end` before `exit.listen` with no `exit.end` is the
-        // listener attached after the EOF it was waiting for, and marks that are merely late are a
-        // slow start. Widening it a third time is not the fix.
+        // #47: stdin is closed before the child has started, so this one wait covers the whole cold
+        // start — bun, the imports, `Server.listen`, the stdin handlers — and only then the exit. It
+        // gets the startup budget rather than the round-trip one for that reason, not because 15s was
+        // unlucky. It still reports the child's own `[acp-profile]` marks, which is what distinguishes
+        // a start that ran long from an EOF that was never seen.
         const code = yield* Effect.promise(() => acp.exited).pipe(
           Effect.timeoutOrElse({
-            duration: Duration.seconds(15),
+            duration: childStartup,
             orElse: () =>
               Effect.fail(
                 new Error(`the acp child had not exited 15s after its stdin closed; its stderr:\n${acp.stderr()}`),
