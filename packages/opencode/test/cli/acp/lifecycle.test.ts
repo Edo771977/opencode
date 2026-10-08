@@ -18,7 +18,20 @@ describe("opencode acp lifecycle subprocess", () => {
         const acp = yield* opencode.acp()
         acp.close()
 
-        const code = yield* Effect.promise(() => acp.exited).pipe(Effect.timeout(Duration.seconds(15)))
+        // #47: this bound was already widened once, from 5s to 15s in `58dfb7fb41`, and on Windows it
+        // is missed again. A bare `TimeoutError` cannot say why, so it reports the child's own
+        // `[acp-profile]` marks instead: `stdin.end` before `exit.listen` with no `exit.end` is the
+        // listener attached after the EOF it was waiting for, and marks that are merely late are a
+        // slow start. Widening it a third time is not the fix.
+        const code = yield* Effect.promise(() => acp.exited).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.seconds(15),
+            orElse: () =>
+              Effect.fail(
+                new Error(`the acp child had not exited 15s after its stdin closed; its stderr:\n${acp.stderr()}`),
+              ),
+          }),
+        )
         expect(code).toBe(0)
       }),
     60_000,

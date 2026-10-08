@@ -149,6 +149,10 @@ export type AcpHandle = {
   // Closes stdin. ACP exits cleanly on stdin EOF; the scope finalizer also
   // calls this, so tests only need it when asserting exit behavior.
   readonly close: () => void
+  // Everything the child has written to stderr so far. The child runs with
+  // `OPENCODE_ACP_PROFILE` on, so this carries its `[acp-profile]` marks, and a
+  // bound that fires has to report them or the instrument is silent (#47).
+  readonly stderr: () => string
   readonly exited: Promise<number>
 }
 
@@ -397,7 +401,10 @@ export function withCliFixture<A, E>(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", cliEntry, ...argv], {
             cwd: opts?.cwd ?? home,
-            env: { ...process.env, ...env, ...opts?.env },
+            // The profile marks are what #47 reads to tell a child that is slow to start from one
+            // that never saw its stdin close. They cost nothing when the variable is unset, and a
+            // test's own `env` still wins over this default.
+            env: { ...process.env, ...env, OPENCODE_ACP_PROFILE: "1", ...opts?.env },
             stdin: "pipe",
             stdout: "pipe",
             stderr: "pipe",
@@ -460,6 +467,7 @@ export function withCliFixture<A, E>(
         receive: Queue.take(responses),
         // proc.stdin.end() is idempotent in Bun; no try/catch needed.
         close: () => proc.stdin.end(),
+        stderr: () => stderrChunks.join(""),
         exited: proc.exited as Promise<number>,
       } satisfies AcpHandle
     })

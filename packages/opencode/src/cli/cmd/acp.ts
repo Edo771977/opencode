@@ -47,8 +47,15 @@ export const AcpCommand = effectCmd({
         process.stdin.on("data", (chunk: Buffer) => {
           controller.enqueue(new Uint8Array(chunk))
         })
-        process.stdin.on("end", () => controller.close())
-        process.stdin.on("error", (err) => controller.error(err))
+        process.stdin.on("end", () => {
+          ACPProfile.mark("cli.acp.stdin.end")
+          controller.close()
+        })
+        process.stdin.on("error", (err) => {
+          ACPProfile.mark("cli.acp.stdin.error", { error: err.message })
+          controller.error(err)
+        })
+        ACPProfile.mark("cli.acp.stdin.listen")
       },
     })
 
@@ -62,10 +69,21 @@ export const AcpCommand = effectCmd({
 
     yield* Effect.logInfo("setup connection")
     process.stdin.resume()
+    ACPProfile.mark("cli.acp.stdin.resume")
+    // #47: these two listeners are attached after `resume()`, and Node emits `"end"` exactly once.
+    // An EOF arriving in between is delivered to the stream's handlers above and to nobody here, which
+    // would park this command forever with its pipe already closed — the shape of `stdin EOF exits
+    // cleanly` missing a 15s bound on Windows. The marks distinguish the two readings without
+    // guessing: `stdin.end` before `exit.listen` with no `exit.end` is that race, while marks that
+    // are simply late are a slow start.
     yield* Effect.promise(
       () =>
         new Promise<void>((resolve, reject) => {
-          process.stdin.on("end", () => resolve())
+          ACPProfile.mark("cli.acp.exit.listen")
+          process.stdin.on("end", () => {
+            ACPProfile.mark("cli.acp.exit.end")
+            resolve()
+          })
           process.stdin.on("error", reject)
         }),
     )

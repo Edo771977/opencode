@@ -36,6 +36,19 @@ export type AcpClient = {
 export function createAcpClient(acp: AcpHandle): AcpClient {
   const state = { nextId: 1 }
 
+  // #47: both waits below used to fail as a bare Effect `TimeoutError`, which cannot tell a child
+  // that is slow to start from one that is wedged — and the auth test that misses this bound on
+  // Windows declares no bound of its own, so that error was the whole report. Naming what was
+  // awaited and attaching the child's `[acp-profile]` stderr is what makes a 15s timeout readable.
+  const awaiting = <A, E>(effect: Effect.Effect<A, E>, what: string, duration: Duration.Duration) =>
+    effect.pipe(
+      Effect.timeoutOrElse({
+        duration,
+        orElse: () =>
+          Effect.fail(new Error(`waiting for ${what} from the acp child timed out; its stderr:\n${acp.stderr()}`)),
+      }),
+    )
+
   const request = <T>(method: string, params?: unknown) =>
     Effect.gen(function* () {
       const id = state.nextId++
@@ -44,7 +57,7 @@ export function createAcpClient(acp: AcpHandle): AcpClient {
       yield* acp.send(message)
 
       while (true) {
-        const received = yield* acp.receive.pipe(Effect.timeout(Duration.seconds(15)))
+        const received = yield* awaiting(acp.receive, `a response to ${method}`, Duration.seconds(15))
         if (isJsonRpcResponse<T>(received) && received.id === id) return received
       }
     })
@@ -52,7 +65,7 @@ export function createAcpClient(acp: AcpHandle): AcpClient {
   const waitForNotification = <T>(method: string, predicate: (params: T) => boolean, timeoutMs = 15_000) =>
     Effect.gen(function* () {
       while (true) {
-        const received = yield* acp.receive.pipe(Effect.timeout(Duration.millis(timeoutMs)))
+        const received = yield* awaiting(acp.receive, `a ${method} notification`, Duration.millis(timeoutMs))
         if (!isJsonRpcNotification<T>(received)) continue
         if (received.method === method && predicate(received.params as T)) return received
       }
