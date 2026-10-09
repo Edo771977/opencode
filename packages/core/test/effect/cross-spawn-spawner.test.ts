@@ -453,19 +453,26 @@ describe("cross-spawn spawner", () => {
     // this bound, on 1adda53919, carried neither and so could not separate the two shapes it leaves
     // open: a child that wrote its line and exited while the merge never signalled an end, and a
     // child still holding its handles with nothing written. Those want different fixes.
+    //
+    // It also returns when the first byte arrived and when the output ended, in milliseconds from
+    // the start of the drain, which is what #40's measurement reads — see `SHELL_BOUND` below.
     const drain = (
       handle: { pid: number; all: Stream.Stream<Uint8Array, PlatformError.PlatformError> },
       what: string,
+      duration: `${number} seconds` = "10 seconds",
     ) =>
       Effect.gen(function* () {
+        const started = performance.now()
         let out = ""
+        let first: number | undefined
         yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
           Effect.sync(() => {
+            first ??= performance.now() - started
             out += chunk
           }),
         ).pipe(
           Effect.timeoutOrElse({
-            duration: "10 seconds",
+            duration,
             orElse: () =>
               Effect.fail(
                 new Error(
@@ -474,7 +481,7 @@ describe("cross-spawn spawner", () => {
               ),
           }),
         )
-        return out
+        return { out, first, end: performance.now() - started }
       })
 
     // The shell tool's own resolution and arguments, with the `stdin: "ignore"` and `forceKillAfter`
@@ -493,6 +500,26 @@ describe("cross-spawn spawner", () => {
         ),
       )
 
+    // #40's measurement. Two Windows jobs have now failed these at ten seconds with the pid still
+    // there and nothing received, while forty spawns of the same shell passed minutes later in the
+    // same process. That leaves two readings this bound cannot separate: a cold start that outlasts
+    // it, or the `overlapped` pipe never delivering what the child wrote. Sixty seconds separates
+    // them — a cold start finishes inside it and names its own cost, a pipe that never delivers
+    // fails at sixty as it did at ten.
+    //
+    // The price is that these stop failing at ten seconds, so they measure #40 instead of
+    // detecting it at the old threshold. Only the shell's drains move; the node children above
+    // keep ten, because they are not what is being measured and a stall there should still be
+    // quick to report.
+    const SHELL_BOUND = "60 seconds"
+
+    // Printed on the passing path as well, which is the point: the harness replays captured output
+    // only when a test fails, through Effect's Console, and a cold start that finishes inside the
+    // bound passes — so a measurement routed through the logger would report nothing in exactly the
+    // case it exists for. The global console is not the captured one.
+    const report = (line: string) => Effect.sync(() => console.error(`[#40 timing] ${line}`))
+    const ms = (value: number | undefined) => (value === undefined ? "never" : `${Math.round(value)}ms`)
+
     fx.live(
       "ends the merged output of a child that wrote to both streams and exited",
       Effect.gen(function* () {
@@ -500,7 +527,7 @@ describe("cross-spawn spawner", () => {
           stdin: "ignore",
           forceKillAfter: "3 seconds",
         })
-        const out = yield* drain(handle, "a node child")
+        const { out } = yield* drain(handle, "a node child")
         expect(out).toContain("out")
         expect(out).toContain("err")
       }),
@@ -514,7 +541,7 @@ describe("cross-spawn spawner", () => {
           stdin: "ignore",
           forceKillAfter: "3 seconds",
         })
-        expect(yield* drain(handle, "a node child")).toContain("done")
+        expect((yield* drain(handle, "a node child")).out).toContain("done")
         const code = yield* bounded(handle.exitCode, "the exit code never arrived after the output ended")
         expect(code).toBe(ChildProcessSpawner.ExitCode(7))
       }),
@@ -525,21 +552,23 @@ describe("cross-spawn spawner", () => {
       "reports the exit code of the preferred shell running a command",
       Effect.gen(function* () {
         // The shell tool's own resolution, which on Windows is whichever of pwsh, powershell, Git
-        // Bash or COMSPEC comes first, with the arguments that shell is given there. A cold shell is
-        // seconds on a loaded runner, hence the wider bound; the failure being chased is a stop.
+        // Bash or COMSPEC comes first, with the arguments that shell is given there. In both jobs
+        // where #40 fired here, this was the first spawn of that shell in the file.
         const shell = Shell.preferred()
         const handle = yield* shellHandle(shell)
-        expect(yield* drain(handle, shell)).toContain("opencode-shell-ok")
+        const drained = yield* drain(handle, shell, SHELL_BOUND)
+        expect(drained.out).toContain("opencode-shell-ok")
         const code = yield* bounded(
           handle.exitCode,
           `the exit code of ${shell} never arrived after the output ended`,
           "20 seconds",
         )
+        yield* report(`${shell} single spawn: first byte ${ms(drained.first)}, output ended ${ms(drained.end)}`)
         expect(code).toBe(ChildProcessSpawner.ExitCode(0))
       }),
-      // Above the sum of the two bounds, not equal to it: at 30s a double stall races the suite
-      // ceiling and reports `timed out after 30000ms`, which is the message these exist to avoid.
-      45_000,
+      // Above the sum of the two bounds, not equal to it: equal, a double stall races the suite
+      // ceiling and reports `timed out after Nms`, which is the message these exist to avoid.
+      120_000,
     )
 
     // The test above reports that the merge of the two streams stalled; this reports which half, by
@@ -575,10 +604,11 @@ describe("cross-spawn spawner", () => {
         // "alive" in every failure and distinguish nothing. Signal 0 checks for the pid instead,
         // which both platforms answer. It cannot tell a zombie from a live process, but a child of
         // this test is reaped by node, so a pid still present here means the process really is.
+        const started = performance.now()
         const side = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>, which: string) =>
           Stream.runDrain(stream).pipe(
             Effect.timeoutOrElse({
-              duration: "10 seconds",
+              duration: SHELL_BOUND,
               orElse: () =>
                 Effect.fail(
                   new Error(
@@ -586,8 +616,9 @@ describe("cross-spawn spawner", () => {
                   ),
                 ),
             }),
+            Effect.map(() => performance.now() - started),
           )
-        yield* Effect.all([side(handle.stdout, "stdout"), side(handle.stderr, "stderr")], {
+        const [stdout, stderr] = yield* Effect.all([side(handle.stdout, "stdout"), side(handle.stderr, "stderr")], {
           concurrency: "unbounded",
         })
         const code = yield* bounded(
@@ -595,9 +626,10 @@ describe("cross-spawn spawner", () => {
           `the exit code of ${shell} never arrived after both of its streams ended`,
           "20 seconds",
         )
+        yield* report(`${shell} sides drained apart: stdout ended ${ms(stdout)}, stderr ended ${ms(stderr)}`)
         expect(code).toBe(ChildProcessSpawner.ExitCode(0))
       }),
-      45_000,
+      120_000,
     )
 
     // #40 shows up in roughly one `unit (windows)` job in four, and a single spawn per run mostly
@@ -623,29 +655,35 @@ describe("cross-spawn spawner", () => {
       "ends the merged output of the preferred shell on each of forty consecutive spawns",
       Effect.gen(function* () {
         const shell = Shell.preferred()
-        yield* Effect.forEach(
+        const ends = yield* Effect.forEach(
           Array.from({ length: ATTEMPTS }, (_, i) => i + 1),
           (attempt) =>
             Effect.scoped(
               Effect.gen(function* () {
                 const handle = yield* shellHandle(shell)
-                expect(yield* drain(handle, `${shell} on attempt ${attempt} of ${ATTEMPTS}`)).toContain(
-                  "opencode-shell-ok",
-                )
+                const drained = yield* drain(handle, `${shell} on attempt ${attempt} of ${ATTEMPTS}`, SHELL_BOUND)
+                expect(drained.out).toContain("opencode-shell-ok")
                 expect(
                   yield* bounded(
                     handle.exitCode,
                     `the exit code of ${shell} never arrived on attempt ${attempt} of ${ATTEMPTS}`,
                   ),
                 ).toBe(ChildProcessSpawner.ExitCode(0))
+                return drained.end
               }),
             ),
-          { discard: true },
+        )
+        // The distribution rather than forty lines: the first attempt beside the typical one and the
+        // worst says whether this shell pays once, early, or per spawn.
+        const sorted = ends.toSorted((a, b) => a - b)
+        const worst = ends.indexOf(sorted[sorted.length - 1]) + 1
+        yield* report(
+          `${shell} ${ATTEMPTS} merged spawns: attempt 1 ${ms(ends[0])}, median ${ms(sorted[Math.floor(sorted.length / 2)])}, worst ${ms(sorted[sorted.length - 1])} on attempt ${worst}`,
         )
       }),
       // Forty shells, not one: generous because a loaded Windows runner pays a few hundred milliseconds
-      // of shell startup each time. A stall still fails at its own bound in ten seconds, so this
-      // ceiling only has to cover the healthy path.
+      // of shell startup each time. A stall fails at its own bound, so this ceiling only has to cover
+      // the healthy path plus one bound — which a cold first attempt and a stall later both fit.
       240_000,
     )
   })
