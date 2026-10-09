@@ -245,7 +245,20 @@ export function withCliFixture<A, E>(
       // Catch AppProcessError (timeout OR spawn failure) and synthesize a
       // non-zero result so the test sees it via the usual `expectExit`
       // path rather than as an unhandled Effect failure.
-      const result = yield* appProc.run(command, { timeout: Duration.millis(timeoutMs) }).pipe(
+      // #47 again, measured on `dev` at `e01732d60c`: `timeoutMs` alone was the child's cold start
+      // plus the work, and nine tests here missed it at once on a runner whose job took 35.4 minutes,
+      // every one `expected exit 0, got -1` after ~30s. The startup is not the caller's to budget for
+      // — it was measured at 6892ms just to reach the command's first line, with `Server.listen` still
+      // unfinished eight seconds later — so it is added rather than folded in: `timeoutMs` keeps
+      // meaning "how long this invocation's work may take", and a protocol regression still fails at
+      // that, while a slow start no longer spends the caller's allowance.
+      //
+      // The sum has to stay under the test's own ceiling or the ceiling fires first and prints none of
+      // this. See the note on the ceilings in `test/cli/run/run-process.test.ts`; several other files
+      // that use this helper carry ceilings at or below the sum, which is a separate problem.
+      const result = yield* appProc
+        .run(command, { timeout: Duration.sum(childStartup, Duration.millis(timeoutMs)) })
+        .pipe(
         Effect.catchTag("AppProcessError", (err) =>
           Effect.succeed({
             command: err.command,
