@@ -313,6 +313,33 @@ describe("pty", () => {
         expect(Cause.squash(result.cause)).toMatchObject({ _tag: "Pty.ExitedError", ptyID: info.id })
     }),
   )
+
+  // bun-pty's `kill()` fires `{ exitCode: 0 }` at its exit listeners, synchronously, for a process it
+  // has only just signalled — a killed terminal reported as a clean exit (#41). What keeps that out
+  // of this service is an ordering in `teardown`: the listeners are disposed before `kill()` runs, so
+  // the invented event reaches nobody. #41 recorded that as "usually"; this makes it a guarantee,
+  // because the protocol has no way to say "ended, code unknown" and a reordering would publish a
+  // clean `Exited` for every terminal the user closed.
+  ptyTest("removing a running session reports no exit, so the one kill() invents never surfaces", () =>
+    Effect.gen(function* () {
+      const pty = yield* Pty.Service
+      const events = yield* subscribePtyEvents()
+      const info = yield* pty.create({ command: "cat", cwd: "/tmp", env: { TERM: "xterm-256color" } })
+      const attached = yield* attachCollecting(info.id)
+      expect(yield* waitForEvents(events, info.id, 1)).toEqual(["created"])
+
+      yield* pty.remove(info.id)
+
+      // The end an attachment sees carries no code: the session was removed, not seen to exit.
+      expect(yield* Deferred.await(attached.ended).pipe(Effect.timeout("5 seconds"))).toEqual({})
+      expect(yield* waitForEvents(events, info.id, 1)).toEqual(["deleted"])
+      // `Exited` is published from a forked fiber, so give one the chance to land after `Deleted`
+      // before reading its absence.
+      yield* Effect.sleep("200 millis")
+      const late = (yield* Queue.clear(events)).filter((event) => event.id === info.id)
+      expect(late).toEqual([])
+    }),
+  )
 })
 
 const configuredShell = process.platform === "win32" ? undefined : Bun.which("bash")
