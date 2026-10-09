@@ -550,10 +550,17 @@ describe("cross-spawn spawner", () => {
     // reports whether the child's pid is still there, because a pipe left open by a process that is
     // gone and one held by a process still running want different fixes.
     //
-    // On 1adda53919 this passed in the same job where the merged drain above failed, and so did the
-    // forty spawns below it. That is the third of those three cases, measured: both sides of the
-    // same shell reached their end separately while the merge of them did not, which puts #40 in
-    // the merge and clears either pipe on its own.
+    // Two samples so far, and they disagree about which of the three it is. On 1adda53919 this
+    // passed in the job where the merged drain above failed, which reads as the third case; on
+    // a153859255 both failed, this one naming `stdout`, which does not. The conclusion drawn from
+    // the first sample alone was wrong, and is recorded on #40 as such: one job is one spawn of
+    // one shell, and this bound fires in roughly one Windows job in four.
+    //
+    // What both samples do agree on is the pair of fields the merged message carries since
+    // a153859255: the pid is still there and nothing has been written. Not a stream that delivered
+    // output and then hung — a child that has produced nothing yet, while the forty spawns below
+    // pass minutes later in the same process. That points at a cold start outlasting the bound
+    // rather than at a stall in either shape.
     //
     // Drained concurrently and not one after the other: Windows opens these `overlapped`, where a
     // reader that stops reading can block the pipe, so reading one to its end while the other waits
@@ -599,11 +606,13 @@ describe("cross-spawn spawner", () => {
     // "attempt 37" are different findings: the first is a cold start, the second a race that needs
     // repetition to show.
     //
-    // It drains the merged stream, which is the correction this test needed. The first version
-    // bounded `stdout` and `stderr` separately, the shape the test above already covers once — so
-    // forty clean attempts on 1adda53919 said nothing about the failure, because in that same job
-    // it was the merge that stalled and the sides that ended. A reproduction has to drain what
-    // `shellImpl` drains.
+    // It drains the merged stream, which is the correction this test needed: the first version
+    // bounded `stdout` and `stderr` separately, the shape the test above already covers once, so it
+    // never exercised what `shellImpl` drains at all.
+    //
+    // Forty attempts have now passed in both jobs where the single spawns above failed, which is
+    // itself the measurement: whatever this is, it is not a per-spawn race — it is paid once, early,
+    // and not again.
     //
     // Sequential, one child at a time, and each in its own scope: that is the shape the shell tool
     // uses, and forty concurrent shells on a two-core runner would be a stall this test manufactured
