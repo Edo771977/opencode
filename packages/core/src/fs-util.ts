@@ -308,6 +308,46 @@ export namespace FSUtil {
       )
     })
 
+  // The names the sweep above collects, made here so the pattern and the thing it matches cannot
+  // drift. They used to be two template literals in two runtimes' skill discovery and a third in
+  // this module's own tests, with nothing coupling any of them to `LEFTOVER`: renaming a suffix in
+  // one runtime silently stopped that runtime from ever being swept, with every test still green
+  // (#39). With one producer, that edit fails the sweeper's suite instead.
+  export const stagingNames = (root: string) => {
+    const token = crypto.randomUUID()
+    return { staging: `${root}.tmp-${token}`, backup: `${root}.old-${token}` }
+  }
+
+  // The swap both runtimes' skill refresh performs, which was duplicated verbatim down to the
+  // rollback, the second copy carrying a comment that said "Same swap as the V1 runtime's" — the
+  // kind of coupling AGENTS.md records as going wrong twice, once per runtime.
+  //
+  // Retried as a whole rather than one rename at a time: an attempt either lands or rolls itself
+  // back, so between attempts the disk holds the old version instead of nothing, the waits sit
+  // outside the mask and stay interruptible, and one bound covers the swap instead of one per
+  // rename. Re-entering re-reads whether the cached copy is still there, which is what recovers a
+  // rollback refused in turn.
+  export const swapStaged = (fs: Interface, root: string, staging: string, backup: string) =>
+    retryWhileHeld(
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const cached = yield* fs.exists(root).pipe(Effect.orDie)
+          if (cached) yield* fs.rename(root, backup)
+          yield* fs.rename(staging, root).pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
+                return yield* Effect.fail(error)
+              }),
+            ),
+          )
+          // Left ignored on purpose: a refused delete only litters, and failing the block for it
+          // would retry a swap that has already landed. `sweepStale` is what collects it.
+          if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
+        }),
+      ),
+    )
+
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {
     return lookup(p) || "application/octet-stream"

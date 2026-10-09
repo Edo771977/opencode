@@ -5,7 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { testEffect } from "../lib/effect"
 import path from "path"
-import { mkdir, symlink, writeFile } from "node:fs/promises"
+import { mkdir, symlink, utimes, writeFile } from "node:fs/promises"
 import { realpathSync } from "fs"
 import { tmpdir } from "../fixture/tmpdir"
 
@@ -421,7 +421,11 @@ describe("FSUtil", () => {
   // are in `packages/opencode` and `packages/core` respectively: deleting both guards left a
   // `packages/core` run entirely green, which is the run somebody editing this file will do.
   describe("sweepStale", () => {
-    const leftover = (dir: string, name: string) => path.join(dir, `${name}.old-${crypto.randomUUID()}`)
+    // Derived from `FSUtil.stagingNames` rather than spelled out again: a third copy of the suffix
+    // here is part of what let the other two drift unnoticed (#39). With the producer in the loop,
+    // renaming a suffix or editing `LEFTOVER` fails this suite instead of quietly retiring the
+    // sweep for whichever runtime was edited.
+    const leftover = (dir: string, name: string) => FSUtil.stagingNames(path.join(dir, name)).backup
 
     it(
       "collects a backup whose directory is back in place, through a symlink as well",
@@ -467,6 +471,37 @@ describe("FSUtil", () => {
         expect(yield* fs.isDir(shadowed)).toBe(true)
         expect(yield* fs.isDir(orphan)).toBe(true)
         expect(yield* fs.isFile(fileShaped)).toBe(true)
+      }),
+    )
+
+    // The staging half of the pattern had no test at all, so `STAGING_MAX_AGE_MS` and the `.tmp-`
+    // suffix were both unguarded: the sweep could have stopped collecting staging directories
+    // entirely and this suite would not have noticed. Keyed off `stagingNames` for the same reason
+    // as the backups above.
+    //
+    // Staging is judged by age where a backup is judged by its pair, and that asymmetry is the point
+    // of the two cases here: a staging directory is made in place rather than moved, so its mtime is
+    // its own, while `rename` leaves a backup carrying the age of the content it holds.
+    it(
+      "collects a staging directory only once it is older than the age that marks it abandoned",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const tmp = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped()
+        const fresh = FSUtil.stagingNames(path.join(tmp, "downloading")).staging
+        const abandoned = FSUtil.stagingNames(path.join(tmp, "gaveup")).staging
+        yield* Effect.promise(async () => {
+          await mkdir(fresh)
+          await mkdir(abandoned)
+          // Two hours back, well past the hour that marks a download as given up on. Set rather
+          // than waited for, and on the directory itself because that is what the sweep stats.
+          const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
+          await utimes(abandoned, old, old)
+        })
+        yield* FSUtil.sweepStale(fs, tmp)
+        // No pairing is involved: neither `downloading` nor `gaveup` exists, and a staging
+        // directory is collectable without one.
+        expect(yield* fs.isDir(fresh)).toBe(true)
+        expect(yield* fs.existsSafe(abandoned)).toBe(false)
       }),
     )
   })

@@ -126,9 +126,7 @@ const layer = Layer.effect(
                   discard: true,
                 })
               } else {
-                const token = crypto.randomUUID()
-                const staging = `${root}.tmp-${token}`
-                const backup = `${root}.old-${token}`
+                const { staging, backup } = FSUtil.stagingNames(root)
                 yield* Effect.gen(function* () {
                   const downloaded = yield* Effect.forEach(
                     files,
@@ -141,27 +139,7 @@ const layer = Layer.effect(
                     (yield* fs.exists(path.join(staging, `${skill.name}.md`)).pipe(Effect.orDie))
                   if (!exists) return
                   yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                  // Same swap as the V1 runtime's, and the same reason for the retry: see
-                  // `FSUtil.retryWhileHeld`. Retried as a whole so an attempt either lands or rolls
-                  // itself back, leaving the old version on disk between attempts rather than
-                  // nothing, with the waits outside the mask and one bound for the swap.
-                  yield* FSUtil.retryWhileHeld(
-                    Effect.uninterruptible(
-                      Effect.gen(function* () {
-                        const cached = yield* fs.exists(root).pipe(Effect.orDie)
-                        if (cached) yield* fs.rename(root, backup)
-                        yield* fs.rename(staging, root).pipe(
-                          Effect.catch((error) =>
-                            Effect.gen(function* () {
-                              if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
-                              return yield* Effect.fail(error)
-                            }),
-                          ),
-                        )
-                        if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
-                      }),
-                    ),
-                  )
+                  yield* FSUtil.swapStaged(fs, root, staging, backup)
                 }).pipe(
                   Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),
                   Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)),
