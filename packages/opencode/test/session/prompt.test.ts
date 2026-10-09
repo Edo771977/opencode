@@ -1744,6 +1744,19 @@ unixNoLLMServer(
   30_000,
 )
 
+// The first spawn of the preferred shell on a loaded Windows runner is a cold start that has been
+// measured at 23130ms to its first byte, against about 500ms for every spawn after it (#40, run
+// 37901763495). These two are the only tests in this file that spawn it on Windows — every other
+// shell test here is unix-only, and the BusyError one is refused before it spawns — so whichever
+// runs first pays that start inside a wait meant for a `sleep 0.2`, and a slow spawn later in the
+// run (2312ms was seen on the 30th of forty) lands on the other. One 15s bound covered start and
+// work together, and fired at 17138ms and 17085ms: not a shell that stopped, a shell that had not
+// finished starting. Same conflation as the ACP child's in #47,
+// and kept apart the same way, as an allowance named for what it pays for and added to the bound
+// on the work rather than folded into it. 30s is the ACP child's figure too, and is above the one
+// sample there is; the timing lines in core's spawner test add a sample on every Windows run.
+const shellStartup = Duration.seconds(30)
+
 it.instance(
   "loop waits while shell runs and starts after shell exits",
   () =>
@@ -1771,7 +1784,11 @@ it.instance(
       // test is 1.8s, so 30s was never a tight budget for it — and yet it died at exactly 30s on a
       // hosted Windows runner, which says something waited rather than that everything was slow.
       // Which of the two it was is what the ceiling could not say and these can.
-      yield* awaitWithTimeout(Fiber.await(sh), "the shell never exited", "15 seconds")
+      yield* awaitWithTimeout(
+        Fiber.await(sh),
+        "the shell never exited",
+        Duration.sum(shellStartup, Duration.seconds(15)),
+      )
       const exit = yield* awaitWithTimeout(
         Fiber.await(loop),
         "the loop never finished after the shell exited",
@@ -1786,7 +1803,9 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  30_000,
+  // Above the bounds in sequence — the shell's start and its work, then the loop — so a stall in
+  // either reports its own message instead of `timed out after Nms`.
+  90_000,
 )
 
 it.instance(
@@ -1815,7 +1834,11 @@ it.instance(
 
       // Same as the test above: 2.5s of work, a 30s ceiling, and a Windows run that reached the
       // ceiling. Named waits say which side stopped.
-      yield* awaitWithTimeout(Fiber.await(sh), "the shell never exited", "15 seconds")
+      yield* awaitWithTimeout(
+        Fiber.await(sh),
+        "the shell never exited",
+        Duration.sum(shellStartup, Duration.seconds(15)),
+      )
       const [ea, eb] = yield* awaitWithTimeout(
         Effect.all([Fiber.await(a), Fiber.await(b)]),
         "a queued loop caller never resumed after the shell exited",
@@ -1831,7 +1854,7 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  30_000,
+  90_000,
 )
 
 unix(
