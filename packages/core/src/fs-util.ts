@@ -4,7 +4,7 @@ import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { lookup } from "mime-types"
 import { Context, Effect, FileSystem, Layer, Option, Schedule, Schema } from "effect"
-import type { PlatformError } from "effect/PlatformError"
+import { systemError, type PlatformError } from "effect/PlatformError"
 import { Glob } from "./util/glob"
 import { serviceUse } from "./effect/service-use"
 import { makeGlobalNode } from "./effect/app-node"
@@ -327,26 +327,52 @@ export namespace FSUtil {
   // outside the mask and stay interruptible, and one bound covers the swap instead of one per
   // rename. Re-entering re-reads whether the cached copy is still there, which is what recovers a
   // rollback refused in turn.
-  export const swapStaged = (fs: Interface, root: string, staging: string, backup: string) =>
-    retryWhileHeld(
-      Effect.uninterruptible(
-        Effect.gen(function* () {
-          const cached = yield* fs.exists(root).pipe(Effect.orDie)
-          if (cached) yield* fs.rename(root, backup)
-          yield* fs.rename(staging, root).pipe(
-            Effect.catch((error) =>
-              Effect.gen(function* () {
-                if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
-                return yield* Effect.fail(error)
-              }),
-            ),
-          )
-          // Left ignored on purpose: a refused delete only litters, and failing the block for it
-          // would retry a swap that has already landed. `sweepStale` is what collects it.
-          if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
-        }),
-      ),
-    )
+  //
+  // `required` are the staging-relative paths that have to be on disk for the staging directory to
+  // be a complete replacement, and the swap refuses rather than promoting without them. Having
+  // written them is not the same as having them: `sweepStale` collects a staging directory that
+  // stalled past `STAGING_MAX_AGE_MS`, which is reachable from any process sharing the cache, and
+  // `writeWithDirs` then makes it again under whichever files were still to be written. Promoting
+  // what is left deletes the backup, so a complete skill is replaced by a partial one with nothing
+  // said — the one path through this that loses content instead of a refresh (#39).
+  export const swapStaged = (fs: Interface, root: string, staging: string, backup: string, required: string[]) =>
+    Effect.gen(function* () {
+      const missing = (yield* Effect.forEach(required, (file) =>
+        fs.exists(join(staging, file)).pipe(
+          Effect.orDie,
+          Effect.map((present) => (present ? undefined : file)),
+        ),
+      )).filter((file): file is string => file !== undefined)
+      if (missing.length > 0)
+        return yield* Effect.fail(
+          systemError({
+            _tag: "NotFound",
+            module: "FileSystem",
+            method: "swapStaged",
+            pathOrDescriptor: staging,
+            description: `refusing to promote a download missing ${missing.length} of ${required.length} files: ${missing.join(", ")}`,
+          }),
+        )
+      return yield* retryWhileHeld(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const cached = yield* fs.exists(root).pipe(Effect.orDie)
+            if (cached) yield* fs.rename(root, backup)
+            yield* fs.rename(staging, root).pipe(
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
+                  return yield* Effect.fail(error)
+                }),
+              ),
+            )
+            // Left ignored on purpose: a refused delete only litters, and failing the block for it
+            // would retry a swap that has already landed. `sweepStale` is what collects it.
+            if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
+          }),
+        ),
+      )
+    })
 
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {

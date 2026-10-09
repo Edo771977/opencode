@@ -144,9 +144,18 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
                   { concurrency: fileConcurrency },
                 )
                 if (!downloaded.every(Boolean)) return
-                if (!(yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie))) return
                 yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                yield* FSUtil.swapStaged(fs, root, staging, backup)
+                // Every file the index named, not just `SKILL.md`: the swap deletes the backup, so
+                // it has to refuse a staging directory that has lost files since it was filled
+                // rather than promote a partial copy. Entries without `SKILL.md` are already
+                // dropped upstream, so that check is this one's first element.
+                yield* FSUtil.swapStaged(
+                  fs,
+                  root,
+                  staging,
+                  backup,
+                  files.map((file) => file.file),
+                )
               }).pipe(
                 Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),
                 Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)),

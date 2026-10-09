@@ -505,4 +505,94 @@ describe("FSUtil", () => {
       }),
     )
   })
+
+  // The swap's two renames were covered through both runtimes' discovery suites and its refusal to
+  // promote an incomplete download by nothing at all, which is the half that loses content: a
+  // promotion deletes the backup, so the cached copy is gone the moment a partial one takes its
+  // place. The two sweeps above are how a staging directory becomes partial without anybody
+  // failing a download — a refresh stalled past `STAGING_MAX_AGE_MS` looks abandoned from any
+  // process sharing the cache, and `writeWithDirs` makes the directory again for whichever files
+  // were still to come (#39).
+  describe("swapStaged", () => {
+    const skill = (dir: string, text: string) =>
+      Effect.promise(async () => {
+        await mkdir(path.join(dir, "references"), { recursive: true })
+        await writeFile(path.join(dir, "SKILL.md"), text)
+        await writeFile(path.join(dir, "references", "guide.md"), `${text} guide`)
+      })
+
+    const required = ["SKILL.md", "references/guide.md"]
+
+    it(
+      "refuses a download that is missing a file, and leaves the cached copy whole",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const tmp = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped()
+        const root = path.join(tmp, "deploy")
+        const { staging, backup } = FSUtil.stagingNames(root)
+        yield* skill(root, "# cached")
+        // What is left of a download whose staging directory was collected and then made again by
+        // the write of the one file that had not landed yet.
+        yield* Effect.promise(async () => {
+          await mkdir(staging, { recursive: true })
+          await writeFile(path.join(staging, "SKILL.md"), "# fresh")
+        })
+
+        // Not `Effect.flip`: with the guard gone the swap succeeds, and flipping a success dies
+        // with `Unknown error: undefined` instead of saying that a partial download was promoted.
+        const error = yield* FSUtil.swapStaged(fs, root, staging, backup, required).pipe(
+          Effect.as(undefined),
+          Effect.catch((error) => Effect.succeed(error)),
+        )
+
+        expect(error?.reason._tag).toBe("NotFound")
+        // The names, not just a count: a refusal that cannot say which file is missing is the kind
+        // of silence that kept this invisible.
+        expect(error?.reason.description).toContain("references/guide.md")
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# cached")
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "references", "guide.md")).text())).toBe(
+          "# cached guide",
+        )
+        // Nothing was moved aside, so there is no backup to recover from either.
+        expect(yield* fs.existsSafe(backup)).toBe(false)
+      }),
+    )
+
+    it(
+      "promotes a complete download and deletes the copy it moved aside",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const tmp = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped()
+        const root = path.join(tmp, "deploy")
+        const { staging, backup } = FSUtil.stagingNames(root)
+        yield* skill(root, "# cached")
+        yield* skill(staging, "# fresh")
+
+        yield* FSUtil.swapStaged(fs, root, staging, backup, required)
+
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# fresh")
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "references", "guide.md")).text())).toBe(
+          "# fresh guide",
+        )
+        expect(yield* fs.existsSafe(backup)).toBe(false)
+        expect(yield* fs.existsSafe(staging)).toBe(false)
+      }),
+    )
+
+    it(
+      "promotes a download with no cached copy to replace",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const tmp = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped()
+        const root = path.join(tmp, "deploy")
+        const { staging, backup } = FSUtil.stagingNames(root)
+        yield* skill(staging, "# first")
+
+        yield* FSUtil.swapStaged(fs, root, staging, backup, required)
+
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# first")
+        expect(yield* fs.existsSafe(backup)).toBe(false)
+      }),
+    )
+  })
 })

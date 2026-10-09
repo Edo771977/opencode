@@ -7,7 +7,7 @@ import { Global } from "@opencode-ai/core/global"
 import { NodeFileSystem } from "@effect/platform-node"
 import { Effect, FileSystem, Layer } from "effect"
 import { systemError } from "effect/PlatformError"
-import { mkdir, rm, utimes, writeFile } from "fs/promises"
+import { mkdir, readdir, rm, utimes, writeFile } from "fs/promises"
 import path from "path"
 import { Discovery } from "../../src/skill/discovery"
 import { testEffect } from "../lib/effect"
@@ -64,6 +64,13 @@ let url: string
 let server: ReturnType<typeof Bun.serve>
 let version = "1"
 let content = "# One"
+// A second file, so a download can lose one and still answer a `SKILL.md` check. The last test
+// sets these; everything above it publishes the single file the rest of the suite expects.
+let files = ["SKILL.md"]
+let reference = "# Reference one"
+// Holds the response for `SKILL.md` open, which is how the last test gets a staging directory with
+// the other file already written and this one still in flight, without racing it.
+let hold: Promise<void> | undefined
 
 const cacheDir = path.join(Global.Path.cache, "skills")
 const read = (dir: string) => Effect.promise(() => Bun.file(path.join(dir, "SKILL.md")).text())
@@ -84,10 +91,14 @@ beforeAll(async () => {
   await rm(cacheDir, { recursive: true, force: true })
   server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const pathname = new URL(req.url).pathname
-      if (pathname === "/index.json") return Response.json({ skills: [{ name: "held", version, files: ["SKILL.md"] }] })
-      if (pathname === "/held/SKILL.md") return new Response(content)
+      if (pathname === "/index.json") return Response.json({ skills: [{ name: "held", version, files }] })
+      if (pathname === "/held/SKILL.md") {
+        if (hold) await hold
+        return new Response(content)
+      }
+      if (pathname === "/held/reference.md") return new Response(reference)
       return new Response("Not Found", { status: 404 })
     },
   })
@@ -230,6 +241,71 @@ describe("Discovery.pull under a refused swap", () => {
           ),
         )
       }),
+    60_000,
+  )
+
+  // The two halves of #39 meeting: a staging directory that stalled past `STAGING_MAX_AGE_MS` is
+  // collectable from any process sharing this cache, `writeWithDirs` makes it again for whichever
+  // files were still to be written, and promoting what is left deletes the backup. The cached skill
+  // is then replaced by a partial copy of itself with nothing logged — the only path through this
+  // that loses content rather than a refresh, and the reason the swap now refuses a download that
+  // is missing a file instead of checking that `SKILL.md` happens to be there.
+  it.live(
+    "refuses a download a sweep took a file from, and keeps the cached skill whole",
+    () =>
+      Effect.gen(function* () {
+        files = ["SKILL.md", "reference.md"]
+        yield* publish("9", "# Nine")
+        const root = path.join(cacheDir, "held")
+        const second = () => Effect.promise(() => Bun.file(path.join(root, "reference.md")).text())
+        expect(yield* second()).toBe("# Reference one")
+
+        version = "10"
+        content = "# Ten"
+        reference = "# Reference ten"
+        let release = () => {}
+        hold = new Promise<void>((resolve) => {
+          release = resolve
+        })
+
+        // The sweep's side of it, by hand: provoking the real one wants a staging directory an hour
+        // old, and what it does to a live download is take a file it has already written. The
+        // response for `SKILL.md` stays open until that has happened, so the swap is reached with a
+        // staging directory holding only the file that landed after the sweep.
+        const taken = Effect.promise(async () => {
+          const deadline = Date.now() + 20_000
+          while (Date.now() < deadline) {
+            const staging = (await readdir(cacheDir)).find((entry) => entry.startsWith("held.tmp-"))
+            const file = staging === undefined ? undefined : path.join(cacheDir, staging, "reference.md")
+            if (file !== undefined && (await Bun.file(file).exists())) {
+              await rm(file)
+              release()
+              return true
+            }
+            await Bun.sleep(25)
+          }
+          release()
+          return false
+        })
+
+        const [removed, dirs] = yield* Effect.all([taken, (yield* Discovery.Service).pull(url)], {
+          concurrency: "unbounded",
+        }).pipe(Effect.ensuring(Effect.sync(() => (hold = undefined))))
+
+        // Without this the rest proves nothing: a pull that finished before the file was taken
+        // would leave the cache correct for the wrong reason.
+        expect(removed).toBe(true)
+        expect(yield* read(dirs[0])).toBe("# Nine")
+        // The half a `SKILL.md` check cannot see, and the one that was lost for good: a promotion
+        // deletes the backup, so this file had no other copy on disk.
+        expect(yield* second()).toBe("# Reference one")
+
+        // And the refusal left the refresh retryable rather than wedged: a promotion would have
+        // written "10" beside the partial copy, and every later pull would have had nothing to do.
+        const again = yield* (yield* Discovery.Service).pull(url)
+        expect(yield* read(again[0])).toBe("# Ten")
+        expect(yield* second()).toBe("# Reference ten")
+      }).pipe(Effect.ensuring(Effect.sync(() => (files = ["SKILL.md"])))),
     60_000,
   )
 })

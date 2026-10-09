@@ -134,12 +134,19 @@ const layer = Layer.effect(
                     { concurrency: fileConcurrency },
                   )
                   if (!downloaded.every(Boolean)) return
-                  const exists =
-                    (yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie)) ||
-                    (yield* fs.exists(path.join(staging, `${skill.name}.md`)).pipe(Effect.orDie))
-                  if (!exists) return
                   yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                  yield* FSUtil.swapStaged(fs, root, staging, backup)
+                  // Every file the index named, not just the one that makes the directory a skill:
+                  // the swap deletes the backup, so it has to refuse a staging directory that has
+                  // lost files since it was filled rather than promote a partial copy. The entries
+                  // reaching here are already filtered to name `SKILL.md` or `<name>.md`, so that
+                  // check is this one's first element.
+                  yield* FSUtil.swapStaged(
+                    fs,
+                    root,
+                    staging,
+                    backup,
+                    files.map((file) => file.file),
+                  )
                 }).pipe(
                   Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),
                   Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)),
