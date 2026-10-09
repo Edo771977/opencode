@@ -446,19 +446,33 @@ describe("cross-spawn spawner", () => {
       duration: `${number} seconds` = "10 seconds",
     ) => effect.pipe(Effect.timeoutOrElse({ duration, orElse: () => Effect.fail(new Error(message)) }))
 
-    // The label is the point: if the drain is what stalls in the third case below, a Windows run
-    // has to say which of pwsh, powershell, Git Bash or cmd was on the other end of it, which is
-    // the whole reason these exist.
-    const drain = (handle: { all: Stream.Stream<Uint8Array, PlatformError.PlatformError> }, what: string) =>
+    // The label is the point: if the drain is what stalls, a Windows run has to say which of pwsh,
+    // powershell, Git Bash or cmd was on the other end of it, which is the whole reason these exist.
+    //
+    // The pid and the bytes already received are in the message because the first real firing of
+    // this bound, on 1adda53919, carried neither and so could not separate the two shapes it leaves
+    // open: a child that wrote its line and exited while the merge never signalled an end, and a
+    // child still holding its handles with nothing written. Those want different fixes.
+    const drain = (
+      handle: { pid: number; all: Stream.Stream<Uint8Array, PlatformError.PlatformError> },
+      what: string,
+    ) =>
       Effect.gen(function* () {
         let out = ""
-        yield* bounded(
-          Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
-            Effect.sync(() => {
-              out += chunk
-            }),
-          ),
-          `the merged output of ${what} never ended`,
+        yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
+          Effect.sync(() => {
+            out += chunk
+          }),
+        ).pipe(
+          Effect.timeoutOrElse({
+            duration: "10 seconds",
+            orElse: () =>
+              Effect.fail(
+                new Error(
+                  `the merged output of ${what} never ended; pid ${handle.pid} is ${alive(handle.pid) ? "still there" : "gone"} and it had written ${out ? JSON.stringify(out) : "nothing"}`,
+                ),
+              ),
+          }),
         )
         return out
       })
@@ -536,6 +550,11 @@ describe("cross-spawn spawner", () => {
     // reports whether the child's pid is still there, because a pipe left open by a process that is
     // gone and one held by a process still running want different fixes.
     //
+    // On 1adda53919 this passed in the same job where the merged drain above failed, and so did the
+    // forty spawns below it. That is the third of those three cases, measured: both sides of the
+    // same shell reached their end separately while the merge of them did not, which puts #40 in
+    // the merge and clears either pipe on its own.
+    //
     // Drained concurrently and not one after the other: Windows opens these `overlapped`, where a
     // reader that stops reading can block the pipe, so reading one to its end while the other waits
     // would be a stall this test caused rather than one it found.
@@ -574,12 +593,17 @@ describe("cross-spawn spawner", () => {
       45_000,
     )
 
-    // The test above has never once fired: #40 shows up in roughly one `unit (windows)` job in four,
-    // and a single spawn per run mostly catches nothing, so the side that stalls is still unnamed and
-    // waiting for a starved runner is not a plan. This runs the same shape ATTEMPTS times in a row and
-    // bounds each side of each attempt, so one job puts the race under load dozens of times instead of
-    // once. The message carries the attempt number because "attempt 1" and "attempt 37" are different
-    // findings: the first is a cold start, the second a race that needs repetition to show.
+    // #40 shows up in roughly one `unit (windows)` job in four, and a single spawn per run mostly
+    // catches nothing, so this runs the same shape ATTEMPTS times in a row and puts the race under
+    // load dozens of times in one job. The attempt number is in the message because "attempt 1" and
+    // "attempt 37" are different findings: the first is a cold start, the second a race that needs
+    // repetition to show.
+    //
+    // It drains the merged stream, which is the correction this test needed. The first version
+    // bounded `stdout` and `stderr` separately, the shape the test above already covers once — so
+    // forty clean attempts on 1adda53919 said nothing about the failure, because in that same job
+    // it was the merge that stalled and the sides that ended. A reproduction has to drain what
+    // `shellImpl` drains.
     //
     // Sequential, one child at a time, and each in its own scope: that is the shape the shell tool
     // uses, and forty concurrent shells on a two-core runner would be a stall this test manufactured
@@ -587,7 +611,7 @@ describe("cross-spawn spawner", () => {
     const ATTEMPTS = 40
 
     fx.live(
-      "ends both of the preferred shell's streams on each of forty consecutive spawns",
+      "ends the merged output of the preferred shell on each of forty consecutive spawns",
       Effect.gen(function* () {
         const shell = Shell.preferred()
         yield* Effect.forEach(
@@ -596,21 +620,9 @@ describe("cross-spawn spawner", () => {
             Effect.scoped(
               Effect.gen(function* () {
                 const handle = yield* shellHandle(shell)
-                const side = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>, which: string) =>
-                  Stream.runDrain(stream).pipe(
-                    Effect.timeoutOrElse({
-                      duration: "10 seconds",
-                      orElse: () =>
-                        Effect.fail(
-                          new Error(
-                            `the ${which} of ${shell} never ended on attempt ${attempt} of ${ATTEMPTS}, and pid ${handle.pid} is ${alive(handle.pid) ? "still there" : "gone"}`,
-                          ),
-                        ),
-                    }),
-                  )
-                yield* Effect.all([side(handle.stdout, "stdout"), side(handle.stderr, "stderr")], {
-                  concurrency: "unbounded",
-                })
+                expect(yield* drain(handle, `${shell} on attempt ${attempt} of ${ATTEMPTS}`)).toContain(
+                  "opencode-shell-ok",
+                )
                 expect(
                   yield* bounded(
                     handle.exitCode,
