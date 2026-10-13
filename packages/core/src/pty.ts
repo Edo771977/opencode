@@ -140,11 +140,14 @@ const layer = Layer.effect(
     })
 
     const removeSession = Effect.fnUntraced(function* (id: ID) {
+      // Unrecorded first, and whether or not the session is still here. The trim loop below takes
+      // `exitOrder[0]` and calls this until the list is short enough, so an id this left behind
+      // would sit at the head and be retried forever.
+      const index = exitOrder.indexOf(id)
+      if (index !== -1) exitOrder.splice(index, 1)
       const session = sessions.get(id)
       if (!session) return
       sessions.delete(id)
-      const index = exitOrder.indexOf(id)
-      if (index !== -1) exitOrder.splice(index, 1)
       yield* Effect.logInfo("removing session", { id })
       teardown(session)
       yield* bus.publish(Pty.Event.Deleted, { id: session.info.id })
@@ -201,6 +204,23 @@ const layer = Layer.effect(
         listeners: [],
       }
       sessions.set(id, session)
+      const reportExit = (exitCode: number) =>
+        Effect.gen(function* () {
+          yield* Effect.logInfo("session exited", { id, exitCode })
+          yield* bus.publish(Pty.Event.Exited, { id, exitCode })
+          while (exitOrder.length > EXITED_LIMIT) {
+            const oldest = exitOrder[0]
+            if (!oldest) break
+            yield* removeSession(oldest)
+          }
+        })
+      // An exit is held until `Created` has been published, and published by `create` itself if it
+      // arrives first. Publishing `Created` awaits every listener, so a process that exits during
+      // it would otherwise announce its exit to consumers that have not been told the session
+      // exists — and they drop it: `removeExited` in the app looks the id up and returns when it is
+      // absent, leaving a dead terminal listed as running for good.
+      let announced = false
+      let held: number | undefined
       session.listeners.push(
         proc.onData((chunk) => {
           session.cursor += chunk.length
@@ -225,22 +245,24 @@ const layer = Layer.effect(
           if (session.info.status === "exited") return
           session.info.status = "exited"
           session.info.exitCode = exitCode
-          notifyEnd(session, { exitCode })
+          // Recorded before the subscribers are told, because `notifyEnd` calls their `onEnd`
+          // synchronously and one that removes this session would otherwise run while the id is not
+          // on the list yet: its removal would find nothing to unrecord, and the push below would
+          // then record an id no session answers to.
           exitOrder.push(id)
-          runFork(
-            Effect.gen(function* () {
-              yield* Effect.logInfo("session exited", { id, exitCode })
-              yield* bus.publish(Pty.Event.Exited, { id, exitCode })
-              while (exitOrder.length > EXITED_LIMIT) {
-                const oldest = exitOrder[0]
-                if (!oldest) break
-                yield* removeSession(oldest)
-              }
-            }),
-          )
+          notifyEnd(session, { exitCode })
+          if (!announced) {
+            held = exitCode
+            return
+          }
+          runFork(reportExit(exitCode))
         }),
       )
       yield* bus.publish(Pty.Event.Created, { info })
+      announced = true
+      // Reached only when the exit arrived during the publish above. A `Created` that fails or is
+      // interrupted never gets here, so no `Exited` follows one that was never announced.
+      if (held !== undefined) yield* reportExit(held)
       return info
     })
 
