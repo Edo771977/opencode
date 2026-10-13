@@ -1,17 +1,49 @@
-export * as SkillDiscovery from "./discovery"
+export * as SkillDiscovery from "./discovery.js"
 
 import path from "path"
 import { Context, Effect, Layer, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-import { FSUtil } from "../fs-util"
-import { SkillIndexEntry } from "./index-entry"
-import { Global } from "../global"
-import { makeGlobalNode } from "../effect/app-node"
-import { httpClient } from "../effect/app-node-platform"
-import { AbsolutePath } from "../schema"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Global } from "@opencode/util/global"
+import { makeGlobalNode } from "@opencode/util/effect/app-node"
+import { httpClient } from "@opencode/util/effect/app-node-platform"
+import { AbsolutePath } from "../schema.js"
+import { Hash } from "@opencode/util/hash"
 
 const skillConcurrency = 4
 const fileConcurrency = 8
+
+function isSafeSegment(value: string) {
+  return (
+    value.length > 0 &&
+    value !== "." &&
+    value !== ".." &&
+    !value.includes("/") &&
+    !value.includes("\\") &&
+    !value.includes("\0")
+  )
+}
+
+function isSafeRelativePath(value: string) {
+  const segments = value.split("/")
+  return (
+    value.length > 0 &&
+    !value.includes("\\") &&
+    !value.includes("\0") &&
+    !value.includes("?") &&
+    !value.includes("#") &&
+    !URL.canParse(value) &&
+    !path.posix.isAbsolute(value) &&
+    !path.win32.isAbsolute(value) &&
+    segments.every((segment) => {
+      try {
+        return isSafeSegment(decodeURIComponent(segment))
+      } catch {
+        return false
+      }
+    })
+  )
+}
 
 class IndexSkill extends Schema.Class<IndexSkill>("SkillDiscovery.IndexSkill")({
   name: Schema.String,
@@ -27,7 +59,7 @@ export interface Interface {
   readonly pull: (url: string) => Effect.Effect<AbsolutePath[]>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SkillDiscovery") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/SkillDiscovery") {}
 
 const layer = Layer.effect(
   Service,
@@ -71,12 +103,10 @@ const layer = Layer.effect(
         )
         if (!data) return []
 
-        const sourceRoot = path.resolve(global.cache, "skills", Bun.hash(base).toString(16))
-        yield* FSUtil.sweepStale(fs, sourceRoot)
-
+        const sourceRoot = path.resolve(global.cache, "skills", Hash.fast(base))
         return yield* Effect.forEach(
           data.skills.flatMap((skill) => {
-            if (!SkillIndexEntry.isSafeSegment(skill.name)) {
+            if (!isSafeSegment(skill.name)) {
               return []
             }
             if (!skill.files.includes("SKILL.md") && !skill.files.includes(`${skill.name}.md`)) {
@@ -91,7 +121,7 @@ const layer = Layer.effect(
             const skillUrl = new URL(`${encodeURIComponent(skill.name)}/`, source)
             const versionFile = path.join(root, ".opencode-version")
             const files = skill.files.map((file) => {
-              if (!SkillIndexEntry.isSafeRelativePath(file)) return undefined
+              if (!isSafeRelativePath(file)) return undefined
               let resource: URL
               try {
                 resource = new URL(file, skillUrl)
@@ -108,10 +138,9 @@ const layer = Layer.effect(
                 file,
               }
             })
-            if (files.some((file) => file === undefined)) {
+            if (!files.every((file): file is { url: string; destination: string; file: string } => file !== undefined))
               return []
-            }
-            return [{ skill, root, versionFile, files: files as { url: string; destination: string; file: string }[] }]
+            return [{ skill, root, versionFile, files }]
           }),
           ({ skill, root, versionFile, files }) =>
             Effect.gen(function* () {
@@ -119,14 +148,16 @@ const layer = Layer.effect(
               const current =
                 version === undefined
                   ? undefined
-                  : yield* fs.readFileStringSafe(versionFile).pipe(Effect.catch(() => Effect.succeed(undefined)))
+                  : yield* fs.readFileStringSafe(versionFile).pipe(Effect.orElseSucceed(() => undefined))
               if (version === undefined || current === version) {
                 yield* Effect.forEach(files, (file) => download(file.url, file.destination), {
                   concurrency: fileConcurrency,
                   discard: true,
                 })
               } else {
-                const { staging, backup } = FSUtil.stagingNames(root)
+                const token = crypto.randomUUID()
+                const staging = `${root}.tmp-${token}`
+                const backup = `${root}.old-${token}`
                 yield* Effect.gen(function* () {
                   const downloaded = yield* Effect.forEach(
                     files,
@@ -134,18 +165,25 @@ const layer = Layer.effect(
                     { concurrency: fileConcurrency },
                   )
                   if (!downloaded.every(Boolean)) return
+                  const exists =
+                    (yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie)) ||
+                    (yield* fs.exists(path.join(staging, `${skill.name}.md`)).pipe(Effect.orDie))
+                  if (!exists) return
                   yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                  // Every file the index named, not just the one that makes the directory a skill:
-                  // the swap deletes the backup, so it has to refuse a staging directory that has
-                  // lost files since it was filled rather than promote a partial copy. The entries
-                  // reaching here are already filtered to name `SKILL.md` or `<name>.md`, so that
-                  // check is this one's first element.
-                  yield* FSUtil.swapStaged(
-                    fs,
-                    root,
-                    staging,
-                    backup,
-                    files.map((file) => file.file),
+                  yield* Effect.uninterruptible(
+                    Effect.gen(function* () {
+                      const cached = yield* fs.exists(root).pipe(Effect.orDie)
+                      if (cached) yield* fs.rename(root, backup)
+                      yield* fs.rename(staging, root).pipe(
+                        Effect.catch((error) =>
+                          Effect.gen(function* () {
+                            if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
+                            return yield* Effect.fail(error)
+                          }),
+                        ),
+                      )
+                      if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
+                    }),
                   )
                 }).pipe(
                   Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),

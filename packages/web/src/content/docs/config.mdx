@@ -372,7 +372,7 @@ You can configure the providers and models you want to use in your OpenCode conf
 }
 ```
 
-The `small_model` option configures a separate model for lightweight tasks like title generation, for any agent that sets [`small`](/docs/agents#small-model), and for an agent that has reached its [`budget`](/docs/agents#budget). It may name a variant, as `model` does, which applies to the agent turns it serves; the one-off calls opencode makes for itself, such as title generation, run the model on its own settings. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model. For an agent turn the model must also be able to call tools; one that cannot is skipped, and the agent runs on the session model.
+The `small_model` option configures a separate model for lightweight tasks like title generation. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model.
 
 Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `setCacheKey`:
 
@@ -393,7 +393,7 @@ Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `se
 
 - `timeout` - Request timeout in milliseconds (default: 300000). Set to `false` to disable.
 - `headerTimeout` - Timeout in milliseconds to wait for response headers (default: 300000, or 5 minutes). This timer stops once headers arrive and does not limit the streamed response body. Set to `false` to disable.
-- `chunkTimeout` - Timeout in milliseconds between streamed response chunks (default: 300000, or 5 minutes). If no chunk arrives in time, the request is aborted. Set to `false` to disable.
+- `chunkTimeout` - Timeout in milliseconds between streamed response chunks (default: 900000, or 15 minutes). If no chunk arrives in time, the request is aborted. Set to `false` to disable.
 - `setCacheKey` - Ensure a cache key is always set for designated provider.
 
 You can also configure [local models](/docs/models#local). [Learn more](/docs/models).
@@ -557,8 +557,6 @@ You can control how deeply subagents can invoke other subagents using the `subag
 ```
 
 The default is `1`, which allows primary agents to launch subagents but prevents those subagents from launching additional subagents. Set it to `2` to allow one additional level of nested subagents, or `0` to prevent all subagent launches.
-
-It can also be written as `experimental.subagent_depth`. Both spellings mean the same thing; the top-level one wins if a file sets both.
 
 ---
 
@@ -773,12 +771,12 @@ You can configure file watcher ignore patterns through the `watcher` option.
 {
   "$schema": "https://opencode.ai/config.json",
   "watcher": {
-    "ignore": ["node_modules/**", "dist/**", ".git/**"]
+    "ignore": ["**/generated/**"]
   }
 }
 ```
 
-Patterns follow glob syntax. Use this to exclude noisy directories from file watching.
+Patterns follow glob syntax. Common dependency, VCS, build, and cache directories are ignored automatically at any depth.
 
 ---
 
