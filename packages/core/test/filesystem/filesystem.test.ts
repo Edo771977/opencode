@@ -1,10 +1,13 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import { Effect, FileSystem, Layer } from "effect"
 import { LayerNodePlatform } from "@opencode/util/effect/app-node-platform"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { testEffect } from "../lib/effect"
 import path from "path"
+import { mkdir, symlink, utimes, writeFile } from "node:fs/promises"
+import { realpathSync } from "fs"
+import { tmpdir } from "../fixture/tmpdir"
 
 const live = LayerNode.compile(LayerNode.group([FSUtil.node, LayerNodePlatform.filesystem]))
 const { effect: it } = testEffect(live)
@@ -410,5 +413,219 @@ describe("FSUtil", () => {
       expect(FSUtil.overlaps("/a/b", "/a/bad")).toBe(false)
       if (process.platform === "win32") expect(FSUtil.overlaps("C:\\a", "D:\\b")).toBe(false)
     })
+
+    // Windows: the JS realpath lstats the drive root, which fails with EPERM in an AppContainer
+    test("resolve goes through the native realpath on Windows", async () => {
+      if (process.platform !== "win32") return
+      await using tmp = await tmpdir()
+      const target = path.join(tmp.path, "real")
+      await mkdir(target)
+      const link = path.join(tmp.path, "link")
+      await symlink(target, link, "junction")
+      const native = spyOn(realpathSync, "native")
+      try {
+        expect(FSUtil.resolve(link)).toBe(FSUtil.normalizePath(target))
+        expect(native.mock.calls[0]?.[0]).toBe(path.resolve(link))
+      } finally {
+        native.mockRestore()
+      }
+    })
+
+    test("resolve falls back to the JS realpath when the native call fails on Windows", async () => {
+      if (process.platform !== "win32") return
+      await using tmp = await tmpdir()
+      const native = spyOn(realpathSync, "native").mockImplementationOnce(() => {
+        throw Object.assign(new Error("EISDIR: illegal operation on a directory"), { code: "EISDIR" })
+      })
+      try {
+        expect(FSUtil.resolve(tmp.path)).toBe(FSUtil.normalizePath(tmp.path))
+      } finally {
+        native.mockRestore()
+      }
+    })
+  })
+  // The sweeper's own guards live here as well as in the skill-discovery suites: on V1 those sat in
+  // another package, and deleting both guards left this package's run entirely green, which is the
+  // run somebody editing fs-util will do.
+  describe("sweepStale", () => {
+    // Derived from `FSUtil.stagingNames` rather than spelled out again: a third copy of the suffix
+    // here is part of what let the other two drift unnoticed (#39). With the producer in the loop,
+    // renaming a suffix or editing `LEFTOVER` fails this suite instead of quietly retiring the
+    // sweep for whichever runtime was edited.
+    const leftover = (dir: string, name: string) => FSUtil.stagingNames(path.join(dir, name)).backup
+
+    it(
+      "collects a backup whose directory is back in place, through a symlink as well",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const paired = leftover(tmp, "plain")
+        const linked = leftover(tmp, "linked")
+        yield* Effect.promise(async () => {
+          await mkdir(path.join(tmp, "plain"))
+          await mkdir(path.join(tmp, "elsewhere"))
+          await symlink(path.join(tmp, "elsewhere"), path.join(tmp, "linked"))
+          await mkdir(paired)
+          await mkdir(linked)
+        })
+        yield* FSUtil.sweepStale(fs, tmp)
+        expect(yield* fs.existsSafe(paired)).toBe(false)
+        // A symlink resolving to the directory is the directory, back in place. Judged by kind
+        // rather than by resolution, this backup would be immortal: backups have no age test.
+        expect(yield* fs.existsSafe(linked)).toBe(false)
+      }),
+    )
+
+    it(
+      "keeps a backup whose name is not a directory, and a leftover that is not one either",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const shadowed = leftover(tmp, "pinned")
+        const orphan = leftover(tmp, "gone")
+        const fileShaped = leftover(tmp, "kept")
+        yield* Effect.promise(async () => {
+          // A file where the cached directory would be: not the swap having landed, so its backup
+          // may still be the only copy of that skill.
+          await writeFile(path.join(tmp, "pinned"), "not a directory")
+          await mkdir(path.join(tmp, "kept"))
+          await mkdir(shadowed)
+          await mkdir(orphan)
+          // Right shape, wrong kind: a swap never leaves a file behind, so this is somebody else's.
+          await writeFile(fileShaped, "not a directory either")
+        })
+        yield* FSUtil.sweepStale(fs, tmp)
+        expect(yield* fs.isDir(shadowed)).toBe(true)
+        expect(yield* fs.isDir(orphan)).toBe(true)
+        expect(yield* fs.isFile(fileShaped)).toBe(true)
+      }),
+    )
+
+    // The staging half of the pattern had no test at all, so `STAGING_MAX_AGE_MS` and the `.tmp-`
+    // suffix were both unguarded: the sweep could have stopped collecting staging directories
+    // entirely and this suite would not have noticed. Keyed off `stagingNames` for the same reason
+    // as the backups above.
+    //
+    // Staging is judged by age where a backup is judged by its pair, and that asymmetry is the point
+    // of the two cases here: a staging directory is made in place rather than moved, so its mtime is
+    // its own, while `rename` leaves a backup carrying the age of the content it holds.
+    it(
+      "collects a staging directory only once it is older than the age that marks it abandoned",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const fresh = FSUtil.stagingNames(path.join(tmp, "downloading")).staging
+        const abandoned = FSUtil.stagingNames(path.join(tmp, "gaveup")).staging
+        yield* Effect.promise(async () => {
+          await mkdir(fresh)
+          await mkdir(abandoned)
+          // Two hours back, well past the hour that marks a download as given up on. Set rather
+          // than waited for, and on the directory itself because that is what the sweep stats.
+          const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
+          await utimes(abandoned, old, old)
+        })
+        yield* FSUtil.sweepStale(fs, tmp)
+        // No pairing is involved: neither `downloading` nor `gaveup` exists, and a staging
+        // directory is collectable without one.
+        expect(yield* fs.isDir(fresh)).toBe(true)
+        expect(yield* fs.existsSafe(abandoned)).toBe(false)
+      }),
+    )
+  })
+
+  // The swap's two renames were covered through the discovery suites and its refusal to promote an
+  // incomplete download by nothing at all, which is the half that loses content: a
+  // promotion deletes the backup, so the cached copy is gone the moment a partial one takes its
+  // place. The two sweeps above are how a staging directory becomes partial without anybody
+  // failing a download — a refresh stalled past `STAGING_MAX_AGE_MS` looks abandoned from any
+  // process sharing the cache, and `writeWithDirs` makes the directory again for whichever files
+  // were still to come (#39).
+  describe("swapStaged", () => {
+    const skill = (dir: string, text: string) =>
+      Effect.promise(async () => {
+        await mkdir(path.join(dir, "references"), { recursive: true })
+        await writeFile(path.join(dir, "SKILL.md"), text)
+        await writeFile(path.join(dir, "references", "guide.md"), `${text} guide`)
+      })
+
+    const required = ["SKILL.md", "references/guide.md"]
+
+    it(
+      "refuses a download that is missing a file, and leaves the cached copy whole",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const root = path.join(tmp, "deploy")
+        const { staging, backup } = FSUtil.stagingNames(root)
+        yield* skill(root, "# cached")
+        // What is left of a download whose staging directory was collected and then made again by
+        // the write of the one file that had not landed yet.
+        yield* Effect.promise(async () => {
+          await mkdir(staging, { recursive: true })
+          await writeFile(path.join(staging, "SKILL.md"), "# fresh")
+        })
+
+        // Not `Effect.flip`: with the guard gone the swap succeeds, and flipping a success dies
+        // with `Unknown error: undefined` instead of saying that a partial download was promoted.
+        const error = yield* FSUtil.swapStaged(fs, root, staging, backup, required).pipe(
+          Effect.as(undefined),
+          Effect.catch((error) => Effect.succeed(error)),
+        )
+
+        expect(error?.reason._tag).toBe("NotFound")
+        // The names, not just a count: a refusal that cannot say which file is missing is the kind
+        // of silence that kept this invisible.
+        expect(error?.reason.description).toContain("references/guide.md")
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# cached")
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "references", "guide.md")).text())).toBe(
+          "# cached guide",
+        )
+        // Nothing was moved aside, so there is no backup to recover from either.
+        expect(yield* fs.existsSafe(backup)).toBe(false)
+      }),
+    )
+
+    it(
+      "promotes a complete download and deletes the copy it moved aside",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const root = path.join(tmp, "deploy")
+        const { staging, backup } = FSUtil.stagingNames(root)
+        yield* skill(root, "# cached")
+        yield* skill(staging, "# fresh")
+
+        yield* FSUtil.swapStaged(fs, root, staging, backup, required)
+
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# fresh")
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "references", "guide.md")).text())).toBe(
+          "# fresh guide",
+        )
+        expect(yield* fs.existsSafe(backup)).toBe(false)
+        expect(yield* fs.existsSafe(staging)).toBe(false)
+      }),
+    )
+
+    it(
+      "promotes a download with no cached copy to replace",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const root = path.join(tmp, "deploy")
+        const { staging, backup } = FSUtil.stagingNames(root)
+        yield* skill(staging, "# first")
+
+        yield* FSUtil.swapStaged(fs, root, staging, backup, required)
+
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# first")
+        expect(yield* fs.existsSafe(backup)).toBe(false)
+      }),
+    )
   })
 })

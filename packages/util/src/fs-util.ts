@@ -2,8 +2,8 @@ import path, { dirname, isAbsolute, join, relative, sep } from "path"
 import { realpathSync } from "fs"
 import { readdir } from "fs/promises"
 import { lookup } from "mime-types"
-import { Context, Effect, FileSystem, Layer, Schema } from "effect"
-import type { PlatformError } from "effect/PlatformError"
+import { Context, Effect, FileSystem, Layer, Option, Schedule, Schema } from "effect"
+import { systemError, type PlatformError } from "effect/PlatformError"
 import { Glob } from "./glob.js"
 import { serviceUse } from "./effect/service-use.js"
 import { makeGlobalNode } from "./effect/app-node.js"
@@ -230,6 +230,161 @@ export namespace FSUtil {
 
   export const node = makeGlobalNode({ service: Service, layer: layer, deps: [filesystem] })
 
+  // Windows refuses to rename a directory while anything still holds a handle inside it, and the
+  // refusal passes: whatever was reading in there, or the scanner that followed it in, lets go in a
+  // moment. Retrying it is the difference between a temp-then-rename swap landing and being thrown
+  // away, and it is bounded because a refusal that will not pass has to fail rather than spin.
+  const HELD_BASE_DELAY_MS = 25
+  const HELD_MAX_DELAY_MS = 250
+  const HELD_TIMEOUT_MS = 3_000
+
+  const heldSchedule = Schedule.min([
+    Schedule.exponential(HELD_BASE_DELAY_MS, 1.7),
+    Schedule.spaced(HELD_MAX_DELAY_MS),
+  ]).pipe(
+    Schedule.jittered,
+    Schedule.while((meta) => meta.elapsed < HELD_TIMEOUT_MS),
+  )
+
+  // EPERM is how the refusal arrives and it has no reason of its own: `handleErrnoException` in
+  // @effect/platform-node-shared gives EACCES `PermissionDenied` and EBUSY `Busy` and leaves
+  // everything else `Unknown`, so the cause's code is what separates a directory that is held from
+  // a path that will never be writable. Read off a real one rather than assumed: provoked through
+  // `rename` against a directory whose parent was immutable, a kernel EPERM arrives as
+  // `reason._tag: "Unknown"` carrying `reason.cause.code: "EPERM"`.
+  const held = (error: PlatformError) =>
+    error.reason._tag === "Busy" ||
+    error.reason._tag === "PermissionDenied" ||
+    (error.reason._tag === "Unknown" &&
+      typeof error.reason.cause === "object" &&
+      error.reason.cause !== null &&
+      "code" in error.reason.cause &&
+      error.reason.cause.code === "EPERM")
+
+  export const retryWhileHeld = <A, R>(effect: Effect.Effect<A, PlatformError, R>) =>
+    effect.pipe(Effect.retry({ while: held, schedule: heldSchedule }))
+
+  // A swap that cannot delete what it moved aside leaves `<name>.old-<uuid>` behind, and a refresh
+  // that dies mid-download leaves `<name>.tmp-<uuid>`. Both of those deletes are ignored where they
+  // happen, for reasons that hold — failing the swap for a refused delete would retry one that has
+  // already landed — but nothing then collected them, so every refusal left a full copy of a cached
+  // directory on disk for good.
+  //
+  // Neither kind is recognised by its age, because age does not say what it looks like it says:
+  // `rename` leaves the mtime of what it moves alone, so a backup carries the age of the content it
+  // holds rather than the moment it was set aside, and anything cached an hour ago would be
+  // collectable the instant a refresh moved it. What marks a backup as garbage is `<name>` being
+  // back in place. Between the swap's two renames, and after a rollback that was refused in turn,
+  // the backup is the only copy of the directory on disk, and it is exactly then that `<name>` is
+  // missing — so that case keeps it. Staging directories have no such pairing, but they are made
+  // here rather than moved, so their mtime is their own and an hour is far longer than a download.
+  const LEFTOVER = /^(.+)\.(old|tmp)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const STAGING_MAX_AGE_MS = 60 * 60 * 1000
+
+  export const sweepStale = (fs: Interface, directory: string) =>
+    Effect.gen(function* () {
+      const entries = yield* fs.readDirectoryEntries(directory).pipe(Effect.orElseSucceed(() => [] as DirEntry[]))
+      const collectable = yield* Effect.forEach(entries, (entry) =>
+        Effect.gen(function* () {
+          // A swap only ever moves directories, so anything else wearing the shape was put there by
+          // something other than a swap and is not ours to delete.
+          if (entry.type !== "directory") return undefined
+          const leftover = LEFTOVER.exec(entry.name)
+          if (!leftover) return undefined
+          const target = join(directory, entry.name)
+          // `<name>` back in place has to mean the cached directory. A plain file there is not a
+          // swap having landed, and taking it for one deletes a backup that is still the only copy:
+          // measured, a file `deploy` beside a `deploy.old-<uuid>` holding the only `SKILL.md` left
+          // nothing but the file. Reachable on V1, whose discovery wrote whatever path a remote index
+          // named (#38); V2 checks the names, and this does not lean on that. This follows links, unlike the kind check above, because a symlink
+          // resolving to the directory is it back in place — and a backup whose pair cannot be
+          // confirmed is kept forever, there being no age test for backups.
+          if (leftover[2] === "old") return (yield* fs.isDir(join(directory, leftover[1]))) ? target : undefined
+          const stat = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
+          if (!stat) return undefined
+          return Date.now() - Option.getOrElse(stat.mtime, () => new Date()).getTime() > STAGING_MAX_AGE_MS
+            ? target
+            : undefined
+        }),
+      )
+      const stale = collectable.filter((target): target is string => target !== undefined)
+      if (stale.length === 0) return
+      yield* Effect.logInfo("sweeping abandoned directories", { directory, count: stale.length })
+      // Ignored in turn: the next pass comes round again.
+      yield* Effect.forEach(
+        stale,
+        (target) => fs.remove(target, { recursive: true, force: true }).pipe(Effect.ignore),
+        {
+          discard: true,
+        },
+      )
+    })
+
+  // The names the sweep above collects, made here so the pattern and the thing it matches cannot
+  // drift. On V1 they were two template literals in two runtimes' skill discovery and a third in
+  // this module's own tests, with nothing coupling any of them to `LEFTOVER`: renaming a suffix in
+  // one runtime silently stopped that runtime from ever being swept, with every test still green
+  // (#39). With one producer, that edit fails the sweeper's suite instead.
+  export const stagingNames = (root: string) => {
+    const token = crypto.randomUUID()
+    return { staging: `${root}.tmp-${token}`, backup: `${root}.old-${token}` }
+  }
+
+  // The swap skill refresh performs, kept beside the sweep that collects what it leaves behind so
+  // the two read the same names and the same rules.
+  //
+  // Retried as a whole rather than one rename at a time: an attempt either lands or rolls itself
+  // back, so between attempts the disk holds the old version instead of nothing, the waits sit
+  // outside the mask and stay interruptible, and one bound covers the swap instead of one per
+  // rename. Re-entering re-reads whether the cached copy is still there, which is what recovers a
+  // rollback refused in turn.
+  //
+  // `required` are the staging-relative paths that have to be on disk for the staging directory to
+  // be a complete replacement, and the swap refuses rather than promoting without them. Having
+  // written them is not the same as having them: `sweepStale` collects a staging directory that
+  // stalled past `STAGING_MAX_AGE_MS`, which is reachable from any process sharing the cache, and
+  // `writeWithDirs` then makes it again under whichever files were still to be written. Promoting
+  // what is left deletes the backup, so a complete skill is replaced by a partial one with nothing
+  // said — the one path through this that loses content instead of a refresh (#39).
+  export const swapStaged = (fs: Interface, root: string, staging: string, backup: string, required: string[]) =>
+    Effect.gen(function* () {
+      const missing = (yield* Effect.forEach(required, (file) =>
+        fs.exists(join(staging, file)).pipe(
+          Effect.orDie,
+          Effect.map((present) => (present ? undefined : file)),
+        ),
+      )).filter((file): file is string => file !== undefined)
+      if (missing.length > 0)
+        return yield* Effect.fail(
+          systemError({
+            _tag: "NotFound",
+            module: "FileSystem",
+            method: "swapStaged",
+            pathOrDescriptor: staging,
+            description: `refusing to promote a download missing ${missing.length} of ${required.length} files: ${missing.join(", ")}`,
+          }),
+        )
+      return yield* retryWhileHeld(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const cached = yield* fs.exists(root).pipe(Effect.orDie)
+            if (cached) yield* fs.rename(root, backup)
+            yield* fs.rename(staging, root).pipe(
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
+                  return yield* Effect.fail(error)
+                }),
+              ),
+            )
+            // Left ignored on purpose: a refused delete only litters, and failing the block for it
+            // would retry a swap that has already landed. `sweepStale` is what collects it.
+            if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
+          }),
+        ),
+      )
+    })
+
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {
     return lookup(p) || "application/octet-stream"
@@ -257,10 +412,23 @@ export namespace FSUtil {
   export function resolve(p: string): string {
     const resolved = path.resolve(windowsPath(p))
     try {
-      return normalizePath(realpathSync(resolved))
+      return normalizePath(realpath(resolved))
     } catch (e: any) {
       if (e?.code === "ENOENT" || e?.code === "ENOTDIR") return normalizePath(resolved)
       throw e
+    }
+  }
+
+  // On Windows the JS realpath lstats every ancestor from the drive root, which fails with EPERM when the
+  // root is unreadable (e.g. an AppContainer). The native call opens only the target; other native failures
+  // (e.g. drives without final-path support) keep the JS fallback.
+  function realpath(p: string): string {
+    if (process.platform !== "win32") return realpathSync(p)
+    try {
+      return realpathSync.native(p)
+    } catch (e: any) {
+      if (e?.code === "ENOENT" || e?.code === "ENOTDIR") throw e
+      return realpathSync(p)
     }
   }
 

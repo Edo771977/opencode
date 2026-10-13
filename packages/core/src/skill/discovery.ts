@@ -104,6 +104,8 @@ const layer = Layer.effect(
         if (!data) return []
 
         const sourceRoot = path.resolve(global.cache, "skills", Hash.fast(base))
+        yield* FSUtil.sweepStale(fs, sourceRoot)
+
         return yield* Effect.forEach(
           data.skills.flatMap((skill) => {
             if (!isSafeSegment(skill.name)) {
@@ -155,9 +157,7 @@ const layer = Layer.effect(
                   discard: true,
                 })
               } else {
-                const token = crypto.randomUUID()
-                const staging = `${root}.tmp-${token}`
-                const backup = `${root}.old-${token}`
+                const { staging, backup } = FSUtil.stagingNames(root)
                 yield* Effect.gen(function* () {
                   const downloaded = yield* Effect.forEach(
                     files,
@@ -165,25 +165,18 @@ const layer = Layer.effect(
                     { concurrency: fileConcurrency },
                   )
                   if (!downloaded.every(Boolean)) return
-                  const exists =
-                    (yield* fs.exists(path.join(staging, "SKILL.md")).pipe(Effect.orDie)) ||
-                    (yield* fs.exists(path.join(staging, `${skill.name}.md`)).pipe(Effect.orDie))
-                  if (!exists) return
                   yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                  yield* Effect.uninterruptible(
-                    Effect.gen(function* () {
-                      const cached = yield* fs.exists(root).pipe(Effect.orDie)
-                      if (cached) yield* fs.rename(root, backup)
-                      yield* fs.rename(staging, root).pipe(
-                        Effect.catch((error) =>
-                          Effect.gen(function* () {
-                            if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
-                            return yield* Effect.fail(error)
-                          }),
-                        ),
-                      )
-                      if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
-                    }),
+                  // Every file the index named, not just the one that makes the directory a skill:
+                  // the swap deletes the backup, so it has to refuse a staging directory that has
+                  // lost files since it was filled rather than promote a partial copy. The entries
+                  // reaching here are already filtered to name `SKILL.md` or `<name>.md`, so the
+                  // check that made the directory a skill is part of this one.
+                  yield* FSUtil.swapStaged(
+                    fs,
+                    root,
+                    staging,
+                    backup,
+                    files.map((file) => file.file),
                   )
                 }).pipe(
                   Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),

@@ -129,6 +129,37 @@ describe("SkillDiscovery.pull", () => {
   )
 
   it.live(
+    "sweeps what a refused delete left behind under the source it pulls",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      const first = yield* catalog.pull([{ name: "deploy", version: "1", files: ["SKILL.md"] }], {
+        "/catalog/deploy/SKILL.md": "# One",
+      })
+      // Each source keeps its skills in a directory of its own, so that — and not the cache root
+      // above it — is where the swaps leave their copies. A sweep aimed a level off would collect
+      // nothing while reading as though it worked.
+      const sourceRoot = path.dirname(first.directories[0])
+      const abandoned = path.join(sourceRoot, `deploy.old-${crypto.randomUUID()}`)
+      // A backup whose skill is gone: the rollback was refused too, so this is the only copy left.
+      const rollback = path.join(sourceRoot, `gone.old-${crypto.randomUUID()}`)
+      yield* Effect.promise(async () => {
+        for (const dir of [abandoned, rollback]) {
+          await fs.mkdir(dir, { recursive: true })
+          await fs.writeFile(path.join(dir, "SKILL.md"), "# Leftover")
+        }
+      })
+
+      yield* catalog.pull([{ name: "deploy", version: "2", files: ["SKILL.md"] }], {
+        "/catalog/deploy/SKILL.md": "# Two",
+      })
+
+      const left = yield* Effect.promise(() => fs.readdir(sourceRoot))
+      expect(left).not.toContain(path.basename(abandoned))
+      expect(left).toContain(path.basename(rollback))
+    }),
+  )
+
+  it.live(
     "publishes complete updates and removes stale files",
     Effect.gen(function* () {
       const catalog = yield* fixture
