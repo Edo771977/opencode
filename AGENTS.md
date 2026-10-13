@@ -184,3 +184,20 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default. At safe step boundaries, steered compaction takes priority up to the first steered move control; other steers retain enqueue order. At an idle boundary, steers take priority; otherwise exactly one queued item delivers before the runner reevaluates continuation. Inbox items may be cancelled or changed between queue and steer before delivery. Promoting new user input resets the selected agent's step allowance; a batch of steers resets it once.
 - One step is one logical LLM call; its durable record covers only the model-visible span. Do not write "provider turn", and do not use bare "turn" for a single call: "turn" is reserved for the future assistant-turn unit containing all steps from prompt promotion until the session would go idle.
 - Keep event replay ownership separate from clustered Session execution ownership.
+
+## Models and Variants
+
+- Run a step entirely on the model that answers it. Cost, the context window it is sized against, the history serialization and the tool definitions all follow the model the request goes to, not the one the Session started on. This fork got it wrong twice, once in each runtime.
+- A variant belongs to the model it was chosen for. Names collide across a provider's models, so apply one only when the request goes to that model, and record on the message the variant the request actually carried. A variant the model does not declare as its own is not a variant.
+
+## Configuration Compatibility
+
+- A setting written wrongly costs its own key, not the file. Both shapes are read as a whole first and group by group when that fails.
+- Drop together the keys the migration folds into one setting. `tools` and `permission` become one ruleset, and keeping the half that allows while dropping the half that denies leaves a file more permissive than it reads; `share`/`autoshare` and `references`/`reference` are fallbacks with the same hazard.
+- Judge a key both config shapes spell the same by the shape it positively has, never by "not the other one": values both shapes accept exist, and so do values neither fully describes.
+- Say which file was ignored and why. A config that vanishes in silence is how three of these bugs stayed invisible.
+
+## Testing the Session Loop
+
+- Decisions about which model, variant, prompt or tool set a step gets are tested by driving the runner against `TestLLM` (`@opencode/ai/testing`) and asserting on the request it compiled. A unit test over the decision function cannot see a decision that is computed correctly and then not applied.
+- Check a new test by breaking the code it covers and watching it fail. Every loop-level test this fork relies on was written against a bug it first reproduced.
