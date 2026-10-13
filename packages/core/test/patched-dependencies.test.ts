@@ -1,0 +1,106 @@
+import { describe, expect, test } from "bun:test"
+import path from "path"
+
+// Bun applies a patch only to the exact `name@version` named in
+// `patchedDependencies`. Bumping the dependency without regenerating the patch
+// does not fail `bun install`; the patch just stops applying and the runtime
+// silently loses whatever the patch fixed. This pins the two together for the
+// packages that ship in the CLI.
+const root = path.resolve(import.meta.dir, "../../..")
+const workspaces = ["packages/cli", "packages/core"]
+const patched = (await Bun.file(path.join(root, "package.json")).json()).patchedDependencies as Record<string, string>
+
+describe("patched dependencies", () => {
+  for (const key of Object.keys(patched)) {
+    const at = key.lastIndexOf("@")
+    const name = key.slice(0, at)
+    const version = key.slice(at + 1)
+
+    test(`${key} matches the installed version`, async () => {
+      expect(await Bun.file(path.join(root, patched[key])).exists()).toBe(true)
+      for (const workspace of workspaces) {
+        // Runtime dependencies only. A patch can target the copy another workspace runs while one
+        // of these builds with a different version: `vite@8.2.2` is patched for the app's dev
+        // server, and the CLI's own build tooling resolves the catalog's 7.x.
+        const manifest = await Bun.file(path.join(root, workspace, "package.json")).json()
+        if (!manifest.dependencies?.[name] && !manifest.optionalDependencies?.[name]) continue
+        const dir = await installed(workspace, name)
+        if (!dir) continue
+        const resolved = (await Bun.file(path.join(dir, "package.json")).json()).version as string
+        expect(resolved, `${workspace} resolves ${name}@${resolved}; patch is for ${version}`).toBe(version)
+      }
+    })
+  }
+
+  // A patch that stopped applying is silent, and so is one applied twice — bun can reach that state
+  // from a cache entry that was itself patched, which happened in this repository's container while
+  // this was being written. The version test above sees neither case.
+  //
+  // Not generic over all the patches, and that was measured rather than assumed, over the twenty
+  // the V1 tree carried: a dozen of them added a bare `//` that their target holds dozens of times,
+  // and five added a substantial line their own target already held elsewhere, so any count-based
+  // rule false-alarms on real patches.
+  //
+  // Two markers are counted, because they fail differently and are guarded differently. The close is
+  // the patch's own: without it a terminal that exits by itself leaks four descriptors, which
+  // `pty-spawn.test.ts` catches deterministically by counting them. The deferred read was the
+  // patch's other hunk until bun-pty 0.4.11 shipped it; it is still counted, because without it a
+  // pty loses the first output of every terminal and the exit of a short-lived one, and the only
+  // behavioural guard for that is a batch whose loss rate depends on the machine's load, so a
+  // version that dropped it would otherwise pass by luck.
+  test("bun-pty's patch is applied exactly once", async () => {
+    // Gated on the patch still being declared, so that dropping it — upstream shipping the fix —
+    // reads as the patch being gone rather than as a broken install.
+    if (!Object.keys(patched).some((key) => key.startsWith("bun-pty@"))) return
+    // The close appears once in the pristine file, in `kill()`, and twice once the patch has added
+    // its own; three would be the patch applied twice.
+    const markers = { "queueMicrotask(() => this._startReadLoop())": 1, "bun_pty_close(this.handle)": 2 }
+    let checked = 0
+    for (const workspace of workspaces) {
+      const dir = await installed(workspace, "bun-pty")
+      if (!dir) continue
+      checked++
+      const text = await Bun.file(path.join(dir, "src", "terminal.ts")).text()
+      for (const [marker, expected] of Object.entries(markers)) {
+        expect(
+          text.split(marker).length - 1,
+          `${workspace} resolves a bun-pty holding the wrong number of \`${marker}\``,
+        ).toBe(expected)
+      }
+    }
+    expect(checked, "bun-pty is not installed in any workspace this test looks at").toBeGreaterThan(0)
+  })
+})
+
+// Which directory holds a dependency is the linker's choice, and both choices run here: the isolated
+// layout bun uses by default gives each workspace its own copy, while `--linker hoisted`, which CI
+// passes on Windows, puts one copy at the root and nests only the versions that conflict with it. So
+// neither path can be written down. A hard-coded workspace path reports a hoisted install as "not
+// installed", and a hard-coded root path asserts against whichever version won the hoist, which may
+// belong to some other package's range — both of which this test did in turn. Asking bun to resolve
+// the name from the workspace answers the only question worth asking: the copy that workspace loads.
+async function installed(workspace: string, name: string) {
+  const entry = resolve(workspace, name)
+  if (!entry) return undefined
+  return manifestDir(path.dirname(entry), name)
+}
+
+// Throws when the workspace does not depend on the name at all, which is ordinary here: bun-pty
+// belongs to core alone, and a missing dependency is the caller's `continue`, not a failure.
+function resolve(workspace: string, name: string) {
+  try {
+    return Bun.resolveSync(name, path.join(root, workspace))
+  } catch {
+    return undefined
+  }
+}
+
+// Resolution lands on an entry file, which sits at a depth the package chooses, so climb until a
+// package.json claims the name rather than guessing how deep it was.
+async function manifestDir(dir: string, name: string): Promise<string | undefined> {
+  const manifest = Bun.file(path.join(dir, "package.json"))
+  if ((await manifest.exists()) && (await manifest.json()).name === name) return dir
+  const parent = path.dirname(dir)
+  if (parent === dir) return undefined
+  return manifestDir(parent, name)
+}
