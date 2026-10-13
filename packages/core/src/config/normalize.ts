@@ -94,7 +94,7 @@ export function normalize(input: unknown): Result {
         : legacyUpdate === true
           ? "auto"
           : undefined
-  const update = prefer(migratedUpdate, nativeUpdate, ["update"], diagnostics)
+  const update = prefer(migratedUpdate, nativeUpdate, own(input, "update"), ["update"], diagnostics)
   if (update !== undefined) encoded.update = update
   if (legacyShare !== undefined) encoded.share = legacyShare
 
@@ -113,6 +113,7 @@ export function normalize(input: unknown): Result {
     nativeReferences,
     isRecord(input.reference) || isRecord(input.references),
     diagnostics,
+    input.references,
   )
 
   const legacyCommands = decodeMap(input.command, ConfigCommandV1.Info, ["command"], diagnostics, decodeValue)
@@ -128,6 +129,7 @@ export function normalize(input: unknown): Result {
     nativeCommands,
     isRecord(input.command) || isRecord(input.commands),
     diagnostics,
+    input.commands,
   )
 
   const legacyAgents = mapValues(
@@ -152,7 +154,7 @@ export function normalize(input: unknown): Result {
   const modeAgents = mapValues(decodeMap(input.mode, ConfigAgentV1.Info, ["mode"], diagnostics, decodeValue), (value) =>
     canonical(ConfigAgent.Info, ConfigMigrateV1.migrateAgent({ ...value, mode: "primary" })),
   )
-  const migratedAgents = mergeMaps(legacyAgents, modeAgents, ["agents"], diagnostics)
+  const migratedAgents = mergeMaps(legacyAgents, modeAgents, ["agents"], diagnostics, input.mode)
   const nativeAgents = decodeMap(input.agents, ConfigAgent.Info, ["agents"], diagnostics, decodeEncoded)
   diagnoseAgentUnsupported(input.agent, ["agent"], diagnostics)
   diagnoseAgentUnsupported(input.mode, ["mode"], diagnostics)
@@ -163,6 +165,7 @@ export function normalize(input: unknown): Result {
     nativeAgents,
     migratedSmallModel !== undefined || isRecord(input.agent) || isRecord(input.mode) || isRecord(input.agents),
     diagnostics,
+    input.agents,
   )
 
   const legacyProviders = migrateProviders(input.provider, diagnostics)
@@ -174,13 +177,26 @@ export function normalize(input: unknown): Result {
     nativeProviders,
     isRecord(input.provider) || isRecord(input.providers),
     diagnostics,
+    input.providers,
   )
 
+  // `tools`, `permission` and `permissions` become one ruleset, so a rule that cannot be read costs
+  // all of them. Keeping the rest would keep an allowance while dropping the denial written to
+  // qualify it — `tools: { bash: true }` beside a mistyped `permission.bash["rm *"]` — and leave the
+  // file more permissive than it reads.
+  const unread = diagnostics.length
   const toolRules = migrateTools(input.tools, diagnostics)
   const permissionRules = migratePermissions(input.permission, diagnostics)
   const nativePermissions = decodeList(input.permissions, Permission.Rule, ["permissions"], diagnostics, decodeEncoded)
   const permissions = [...toolRules, ...permissionRules, ...nativePermissions]
-  if (permissions.length || Array.isArray(input.permissions)) encoded.permissions = permissions
+  const unreadable = diagnostics.slice(unread).some((diagnostic) => diagnostic.kind === "invalid")
+  if (unreadable && permissions.length)
+    diagnostics.push({
+      kind: "invalid",
+      path: ["permissions"],
+      message: "dropped every permission rule because one of them is malformed",
+    })
+  if (!unreadable && (permissions.length || Array.isArray(input.permissions))) encoded.permissions = permissions
 
   const legacyPlugins = decodeList(input.plugin, ConfigPluginV1.Spec, ["plugin"], diagnostics, decodeValue).map(
     (plugin) => (typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] }),
@@ -219,7 +235,12 @@ export function normalize(input: unknown): Result {
   Object.entries(nativeAtomic).forEach(([key, schema]) => {
     if (!own(input, key)) return
     const value = decodeEncoded(schema, input[key], [key], diagnostics)
-    if (value === undefined) return
+    if (value === undefined) {
+      // A malformed setting must not let the legacy one it overrides through: `share: "sometimes"`
+      // beside `autoshare: true` would otherwise turn on automatic sharing.
+      if (own(encoded, key)) dropFallback(encoded, key, [key], diagnostics)
+      return
+    }
     overlay(encoded, key, value, [key], diagnostics)
   })
 
@@ -286,7 +307,11 @@ function normalizeMcp(input: Record<string, unknown>, encoded: Record<string, un
       })
     }
   }
-  const servers = mergeMaps(legacyServers, nativeServers, ["mcp", "servers"], diagnostics)
+  const authoredServers =
+    isRecord(input.mcp) && !isDirectLegacyMcp(input.mcp.servers) && !isEnabledOnlyMcp(input.mcp.servers)
+      ? input.mcp.servers
+      : undefined
+  const servers = mergeMaps(legacyServers, nativeServers, ["mcp", "servers"], diagnostics, authoredServers)
   if (!Object.keys(servers).length && !Object.keys(timeout).length) {
     if (isRecord(input.mcp) && !Object.keys(input.mcp).length) encoded.mcp = {}
     return
@@ -360,7 +385,13 @@ function normalizeCompaction(
           diagnostics,
         )
       : undefined
-  const tokens = prefer(legacyTokens, nativeTokens, ["compaction", "keep", "tokens"], diagnostics)
+  const tokens = prefer(
+    legacyTokens,
+    nativeTokens,
+    own(input.compaction, "keep") && (!nativeKeep || own(nativeKeep, "tokens")),
+    ["compaction", "keep", "tokens"],
+    diagnostics,
+  )
   if (tokens !== undefined) result.keep = { tokens }
   const legacyBuffer = own(input.compaction, "reserved")
     ? decodeEncoded(
@@ -373,7 +404,13 @@ function normalizeCompaction(
   const nativeBuffer = own(input.compaction, "buffer")
     ? decodeEncoded(ConfigCompaction.Info.fields.buffer, input.compaction.buffer, ["compaction", "buffer"], diagnostics)
     : undefined
-  const buffer = prefer(legacyBuffer, nativeBuffer, ["compaction", "buffer"], diagnostics)
+  const buffer = prefer(
+    legacyBuffer,
+    nativeBuffer,
+    own(input.compaction, "buffer"),
+    ["compaction", "buffer"],
+    diagnostics,
+  )
   if (buffer !== undefined) result.buffer = buffer
   if (Object.keys(result).length || !Object.keys(input.compaction).length) encoded.compaction = result
 }
@@ -727,18 +764,27 @@ function mergeMap(
   native: Readonly<Record<string, unknown>>,
   present: boolean,
   diagnostics: Diagnostic[],
+  authored: unknown,
 ) {
-  const merged = mergeMaps(legacy, native, [key], diagnostics)
+  const merged = mergeMaps(legacy, native, [key], diagnostics, authored)
   if (present) target[key] = merged
 }
 
+// `authored` is the native map as written. An entry it names that did not decode, or the whole map
+// when it is not one, overrides the legacy entry of the same name all the same: falling back to the
+// legacy one would apply a setting the file no longer says.
 function mergeMaps(
   legacy: Readonly<Record<string, unknown>>,
   native: Readonly<Record<string, unknown>>,
   path: string[],
   diagnostics: Diagnostic[],
+  authored: unknown,
 ) {
   const result = Object.fromEntries(Object.entries(legacy))
+  if (authored !== undefined)
+    Object.keys(result)
+      .filter((name) => !isRecord(authored) || (own(authored, name) && !own(native, name)))
+      .forEach((name) => dropFallback(result, name, [...path, name], diagnostics))
   Object.entries(native).forEach(([name, value]) => {
     if (own(result, name) && !isDeepStrictEqual(result[name], value)) conflict([...path, name], diagnostics)
     setOwn(result, name, value)
@@ -766,7 +812,12 @@ function overlay(
   target[key] = value
 }
 
-function prefer(legacy: unknown, native: unknown, path: string[], diagnostics: Diagnostic[]) {
+function prefer(legacy: unknown, native: unknown, authored: boolean, path: string[], diagnostics: Diagnostic[]) {
+  if (authored && native === undefined) {
+    if (legacy !== undefined)
+      diagnostics.push({ kind: "invalid", path, message: "dropped the legacy value a malformed setting overrides" })
+    return undefined
+  }
   if (native === undefined) return legacy
   if (legacy !== undefined && !isDeepStrictEqual(legacy, native)) conflict(path, diagnostics)
   return native
@@ -775,6 +826,11 @@ function prefer(legacy: unknown, native: unknown, path: string[], diagnostics: D
 function unsupportedIfPresent(value: Record<string, unknown>, key: string, path: string[], diagnostics: Diagnostic[]) {
   if (!own(value, key)) return
   diagnostics.push({ kind: "unsupported", path, message: "omitted unsupported legacy setting" })
+}
+
+function dropFallback(target: Record<string, unknown>, key: string, path: string[], diagnostics: Diagnostic[]) {
+  delete target[key]
+  diagnostics.push({ kind: "invalid", path, message: "dropped the legacy value a malformed setting overrides" })
 }
 
 function invalid(path: string[], diagnostics: Diagnostic[]) {

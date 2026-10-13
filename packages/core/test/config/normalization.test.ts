@@ -229,7 +229,9 @@ describe("ConfigNormalize", () => {
     expect(JSON.stringify(result.diagnostics)).not.toContain(secret)
   })
 
-  test("recovers malformed named entries and retains a valid legacy collision", () => {
+  // This fork's rule, not upstream's: a malformed native entry still overrides the legacy entry of
+  // the same name, because falling back to it applies a setting the file no longer says.
+  test("recovers malformed named entries and drops the legacy entry a malformed one overrides", () => {
     const result = normalized({
       command: { fallback: { template: "legacy" } },
       commands: {
@@ -242,11 +244,12 @@ describe("ConfigNormalize", () => {
         invalid: { env: [1] },
       },
     })
-    expect(result.encoded.commands).toEqual({ fallback: { template: "legacy" }, valid: { template: "native" } })
+    expect(result.encoded.commands).toEqual({ valid: { template: "native" } })
     expect(result.encoded.providers).toEqual({ valid: { name: "Valid" } })
     expect(result.diagnostics.filter((item) => item.kind === "invalid").map((item) => item.path)).toEqual([
       ["commands", "fallback"],
       ["commands", "invalid"],
+      ["commands", "fallback"],
       ["providers", "invalid"],
     ])
   })
@@ -328,7 +331,9 @@ describe("ConfigNormalize", () => {
     expect(JSON.stringify(result.diagnostics)).not.toContain("TOPSECRET")
   })
 
-  test("recovers list items for skills, instructions, and permissions", () => {
+  // Permissions are the exception to per-item recovery in this fork: see "drops every rule of a ruleset
+  // that holds a malformed one".
+  test("recovers list items for skills and instructions, and drops a ruleset holding a malformed rule", () => {
     const result = normalized({
       skills: { paths: ["./skills", 1], urls: [false, "https://example.com/skills"] },
       instructions: ["one", 2, "three"],
@@ -339,8 +344,8 @@ describe("ConfigNormalize", () => {
     })
     expect(result.encoded.skills).toEqual(["./skills", "https://example.com/skills"])
     expect(result.encoded.instructions).toEqual(["one", "three"])
-    expect(result.encoded.permissions).toEqual([{ action: "read", resource: "*", effect: "allow" }])
-    expect(result.diagnostics.filter((item) => item.kind === "invalid")).toHaveLength(4)
+    expect(result.encoded.permissions).toBeUndefined()
+    expect(result.diagnostics.filter((item) => item.kind === "invalid")).toHaveLength(5)
   })
 
   test("omits malformed collection roots instead of synthesizing empty values", () => {
@@ -669,5 +674,123 @@ describe("ConfigNormalize", () => {
       experimental: { subagent_depth: 0 },
     })
     expect(result.encoded.share).toBeUndefined()
+  })
+
+  // AGENTS.md, "Configuration Compatibility": a setting written wrongly costs its own key, in either
+  // shape. On V1 a typo in a legacy file took the whole file with it while the same typo in a
+  // current-shape file cost only itself.
+  test.each([
+    { name: "legacy", agents: { agent: { build: { prompt: "kept" } } } },
+    { name: "current", agents: { agents: { build: { system: "kept" } } } },
+  ])("keeps the rest of a $name file around a malformed key", (input) => {
+    const result = normalized({ model: "anthropic/claude", skills: 5, ...input.agents })
+    expect(result.encoded).toEqual({
+      model: { providerID: "anthropic", model: "claude" },
+      agents: { build: { system: "kept" } },
+    })
+    expect(result.diagnostics.map((item) => item.path)).toEqual([["skills"]])
+  })
+
+  // AGENTS.md, "Configuration Compatibility": a key both shapes spell the same is judged by the shape
+  // it has, not by which other keys share the file. On V1 one legacy key sent the whole file to the
+  // legacy reader, which rejected these current shapes and every other setting with them.
+  test("reads shared keys by their own shape next to legacy keys", () => {
+    const current = normalized({
+      agent: { build: { prompt: "legacy" } },
+      mcp: { servers: { srv: { type: "remote", url: "https://example.test/mcp" } } },
+      skills: ["./skill"],
+      compaction: { keep: { tokens: 5 } },
+    })
+    expect(current.encoded).toEqual({
+      agents: { build: { system: "legacy" } },
+      mcp: { servers: { srv: { type: "remote", url: "https://example.test/mcp" } } },
+      skills: ["./skill"],
+      compaction: { keep: { tokens: 5 } },
+    })
+    expect(current.diagnostics).toEqual([])
+    const legacy = normalized({
+      agents: { build: { system: "current" } },
+      mcp: { srv: { type: "remote", url: "https://example.test/mcp" } },
+      skills: { paths: ["./skill"] },
+      compaction: { preserve_recent_tokens: 5 },
+    })
+    expect(legacy.encoded).toEqual({ ...current.encoded, agents: { build: { system: "current" } } })
+    expect(legacy.diagnostics).toEqual([])
+  })
+
+  // AGENTS.md, "Configuration Compatibility": drop together the keys the migration folds into one
+  // setting. Each case below writes a setting wrongly next to the one it folds with, and checks that
+  // what the file says is not replaced by what it no longer says.
+  describe("drops together what folds into one setting", () => {
+    const dropped = (result: ReturnType<typeof normalized>) =>
+      result.diagnostics.filter((item) => item.message.startsWith("dropped")).map((item) => item.path)
+
+    test("drops every rule of a ruleset that holds a malformed one", () => {
+      // `denied` is a typo for `deny`. Keeping the allowance without the denial written to qualify
+      // it leaves the file more permissive than it reads.
+      const result = normalized({ tools: { bash: true }, permission: { bash: { "rm *": "denied" } } })
+      expect(result.encoded.permissions).toBeUndefined()
+      expect(dropped(result)).toEqual([["permissions"]])
+      expect(
+        normalized({
+          permissions: [
+            { action: "shell", resource: "*", effect: "allow" },
+            { action: "shell", resource: "rm *", effect: "denied" },
+          ],
+        }).encoded.permissions,
+      ).toBeUndefined()
+    })
+
+    test("keeps a ruleset whose rules all read", () => {
+      const result = normalized({ tools: { bash: true }, permission: { bash: { "rm *": "deny" } } })
+      expect(result.encoded.permissions).toEqual([
+        { action: "shell", resource: "*", effect: "allow" },
+        { action: "shell", resource: "rm *", effect: "deny" },
+      ])
+      expect(result.diagnostics).toEqual([])
+    })
+
+    test("does not let a legacy fallback through when the setting overriding it is malformed", () => {
+      // Without this, a mistyped `share` turns on the automatic sharing `autoshare` asks for.
+      const share = normalized({ share: "sometimes", autoshare: true })
+      expect(share.encoded.share).toBeUndefined()
+      expect(dropped(share)).toEqual([["share"]])
+      expect(normalized({ snapshots: "no", snapshot: true }).encoded.snapshots).toBeUndefined()
+      expect(normalized({ update: "sometimes", autoupdate: true }).encoded.update).toBeUndefined()
+      expect(
+        normalized({ compaction: { preserve_recent_tokens: 20_000, keep: { tokens: "many" } } }).encoded.compaction,
+      ).toBeUndefined()
+      // Written alone, the legacy spelling still migrates.
+      expect(normalized({ autoshare: true }).encoded.share).toBe("auto")
+    })
+
+    test("drops the legacy entry a malformed native entry of the same name overrides", () => {
+      const references = normalized({
+        reference: { docs: { path: "../legacy" }, other: { path: "../other" } },
+        references: { docs: { path: 5 } },
+      })
+      expect(references.encoded.references).toEqual({ other: { path: "../other" } })
+      expect(dropped(references)).toEqual([["references", "docs"]])
+      // A native map that is not a map overrides every legacy entry: there are no names to keep apart.
+      expect(normalized({ reference: { docs: { path: "../legacy" } }, references: 5 }).encoded.references).toEqual({})
+      // An agent carries its own permissions, so this is the ruleset hazard again one level down.
+      expect(
+        normalized({
+          agent: { build: { tools: { bash: true } } },
+          agents: { build: { permissions: "deny" } },
+        }).encoded.agents,
+      ).toEqual({})
+      expect(
+        normalized({ agent: { build: { prompt: "agent" } }, mode: { build: { prompt: 5 } } }).encoded.agents,
+      ).toEqual({})
+      expect(
+        normalized({
+          mcp: {
+            docs: { type: "remote", url: "https://legacy.example.test/mcp" },
+            servers: { docs: { type: "remote" } },
+          },
+        }).encoded.mcp,
+      ).toBeUndefined()
+    })
   })
 })

@@ -1566,6 +1566,55 @@ describe("Config", () => {
     ),
   )
 
+  it.live("never keeps the half of a permission pair that allows without the half that denies", () => {
+    const output: Array<Record<string, unknown>> = []
+    const logger = Logger.map(Logger.formatStructured, (entry) => {
+      if (!Array.isArray(entry.message) || entry.message[0] !== "configuration normalization diagnostic") return
+      const details = entry.message[1]
+      if (typeof details === "object" && details !== null) output.push(details as Record<string, unknown>)
+    })
+    return Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          // `denied` is a typo for `deny`. V1 writes allowances in `tools` and qualifies them in
+          // `permission`, and both become one ruleset: keeping the allowance while dropping the
+          // denial would leave this file more permissive than written. The same pairing protects a
+          // fallback: dropping the `share` that was written would let `autoshare` through.
+          const file = path.join(tmp.path, "opencode.json")
+          yield* Effect.promise(() =>
+            fs.writeFile(
+              file,
+              JSON.stringify({
+                model: "anthropic/claude",
+                tools: { bash: true },
+                permission: { bash: { "rm *": "denied" } },
+                share: "sometimes",
+                autoshare: true,
+              }),
+            ),
+          )
+
+          // Provided after the write: the layer reads the file when it is built.
+          const documents = yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            return (yield* config.entries()).filter((entry) => entry.type === "document")
+          }).pipe(Effect.provide(testLayer(tmp.path)))
+
+          expect(documents[0]?.info.model).toMatchObject({ providerID: "anthropic", model: "claude" })
+          expect(documents[0]?.info.permissions).toBeUndefined()
+          expect(documents[0]?.info.share).toBeUndefined()
+          // And the file says so: which file, which setting, and that the rest of it was dropped too.
+          expect(
+            output
+              .filter((item) => item.source === file && String(item.action).startsWith("dropped"))
+              .map((item) => item.path),
+          ).toEqual(["$.permissions", "$.share"])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(Effect.provide(Logger.layer([logger])))
+  })
+
   it.live("migrates the deprecated reference key into references", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) =>
