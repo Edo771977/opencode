@@ -99,21 +99,39 @@ export namespace RipgrepBinary {
 
             const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
             const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
-            const archive = path.join(global.bin, filename)
-
             yield* Effect.logInfo("downloading ripgrep", { url })
             yield* fs.ensureDir(global.bin).pipe(Effect.orDie)
-            const bytes = yield* HttpClientRequest.get(url).pipe(
-              http.execute,
-              Effect.flatMap((response) => response.arrayBuffer),
-              Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
-            )
-            if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
+            return yield* Effect.scoped(
+              Effect.gen(function* () {
+                // `target` is what every other process sharing this bin directory checks for, so it
+                // only ever appears whole: the archive and the extracted copy live in a staging
+                // directory of this install's own, and the executable is renamed into place. Copied
+                // there directly, a second process could run a half-written binary, and two
+                // installs writing one shared archive path could each extract the other's bytes.
+                const dir = yield* fs.makeTempDirectoryScoped({ directory: global.bin, prefix: "ripgrep-install-" })
+                const archive = path.join(dir, filename)
+                const staged = path.join(dir, path.basename(target))
+                const bytes = yield* HttpClientRequest.get(url).pipe(
+                  http.execute,
+                  Effect.flatMap((response) => response.arrayBuffer),
+                  Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+                )
+                if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
 
-            yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
-            yield* extract(archive, config, target)
-            yield* fs.remove(archive, { force: true }).pipe(Effect.ignore)
-            return target
+                yield* fs.writeFile(archive, new Uint8Array(bytes))
+                yield* extract(archive, config, staged)
+                // A concurrent install that renamed first wins; Windows refuses replacing it, and the
+                // copy already there is as good as this one.
+                yield* fs
+                  .rename(staged, target)
+                  .pipe(
+                    Effect.catch((error) =>
+                      fs.isFile(target).pipe(Effect.flatMap((exists) => (exists ? Effect.void : Effect.fail(error)))),
+                    ),
+                  )
+                return target
+              }),
+            )
           }),
         ),
       })
