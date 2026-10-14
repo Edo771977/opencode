@@ -16,6 +16,8 @@ Explain how authentication works in this project
 
 Press **Shift+Enter**, **Ctrl+Enter**, **Alt+Enter**, or **Ctrl+J** for a new line. While OpenCode is working, **Enter** steers the active session; press **Ctrl+X**, then **Enter** to queue the prompt for later.
 
+A new line on a numbered item such as `1. read the logs` starts the next number, and items below it are renumbered. A new line on an item with nothing after its number ends the list instead. Once an item is down to its bare number, **Backspace** removes it together with its line break, and empty items left at the end are dropped when the prompt is sent.
+
 ## Context
 
 Type `@` to search for a file, then select it to attach that file to the prompt. Keep typing after `@` to narrow the results.
@@ -69,6 +71,8 @@ Press **Ctrl+X**, then **A** to choose an agent, or run `/agents`. Press **Shift
 ## Sessions
 
 Press **Ctrl+X**, then **N** to start a new session. Press **Ctrl+X**, then **L** or run `/sessions` to return to an existing session; **Ctrl+O** opens recent sessions and projects together.
+
+Title a session `group | title`, for example `release | update the changelog`, to file it under a **Release:** heading in the session list, where it shows as `update the changelog`. Groups come before the dated sessions, in alphabetical order, with the most recent session of each group first. Only the first `|` separates the group, and renaming a session from the list starts from its full title, group included.
 
 Tabs are enabled by default. Use **Ctrl+Tab** and **Ctrl+Shift+Tab** to move between them, **Ctrl+X** then **W** to close one, and **Ctrl+Shift+T** to reopen the last closed tab.
 

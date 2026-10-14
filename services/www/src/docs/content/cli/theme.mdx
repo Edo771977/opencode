@@ -50,9 +50,9 @@ cp theme.json ~/.config/opencode/themes/
 
 You can also put the theme in a project's `.opencode/themes` directory to make it available only in that project.
 
-The filename becomes the theme name. For example, `my-theme.json` appears as `my-theme`. Restart OpenCode after adding the file, then run `/themes` to select it.
+The filename becomes the theme name. For example, `my-theme.json` or `my-theme.jsonc` appears as `my-theme`. Restart OpenCode after adding the file, then run `/themes` to select it.
 
-OpenCode reads `.json` files only. A theme closer to the current directory replaces a global or parent theme with the same name.
+OpenCode reads `.json` and `.jsonc` files, so a theme may carry comments and trailing commas. A theme closer to the current directory replaces a global or parent theme with the same name, and in one directory `.jsonc` wins over `.json`.
 
 ## Using Themes in Plugins
 
