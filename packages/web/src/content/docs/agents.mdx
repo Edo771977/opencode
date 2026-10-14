@@ -719,6 +719,16 @@ Users can always invoke any subagent directly via the `@` autocomplete menu, eve
 
 ---
 
+### Parallel subagents
+
+An agent that can call subagents can also run several at once with `subagent_parallel`: two to five independent subtasks, each in its own subagent session, started together and reported together. The wall-clock time is roughly the longest subtask instead of the sum.
+
+The same rules govern both tools. Each subtask asks the `subagent` permission for its agent, one question at a time and before anything starts, and a rule that hides `subagent` hides `subagent_parallel` too. Every subtask is checked first, so a bad entry late in the list never leaves sessions behind for its siblings. Subagents do not fan out by default, because `experimental.subagent_depth` caps nesting at one level.
+
+Each subtask reports on its own: completed, running if it was moved to the background, or error, which carries its failure and, when there is one, the session to continue. A subtask can declare the [fields it needs back](#subagent-results), which is what makes several answers integrable side by side.
+
+---
+
 ### Subagent results
 
 A subagent answers in prose, and the caller receives its last text. That reads well and is hard to act on, so a caller that will use the answer rather than relay it can declare the fields it needs back. The subagent is then told to end with one JSON object carrying exactly those fields, and the call fails if it does not produce them, so the caller never has to parse prose or guess at a missing value.

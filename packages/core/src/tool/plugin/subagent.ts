@@ -4,6 +4,7 @@ import { ToolFailure } from "@opencode/ai"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Effect, Predicate, Schema } from "effect"
+import type { Tool } from "@opencode/schema/tool"
 import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
 import { Job } from "../../job.js"
@@ -66,6 +67,41 @@ export const description = [
   "Use background only for independent work that can run while you continue elsewhere.",
 ].join("\n")
 
+export const parallelName = "subagent_parallel"
+const PARALLEL_LIMIT = 5
+
+export const ParallelInput = Schema.Struct({
+  tasks: Schema.Array(
+    Schema.Struct({
+      agent: Input.fields.agent,
+      description: Input.fields.description,
+      prompt: Input.fields.prompt,
+      model: Input.fields.model,
+      output: Input.fields.output,
+    }),
+  ).annotate({ description: `2-${PARALLEL_LIMIT} independent subtasks to run at the same time` }),
+})
+
+export const ParallelOutput = Schema.Struct({
+  tasks: Schema.Array(
+    Schema.Struct({
+      description: Schema.String,
+      sessionID: Schema.optionalKey(SessionSchema.ID),
+      state: Schema.Literals(["completed", "running", "error"]),
+      output: Schema.String,
+    }),
+  ),
+})
+
+export const parallelDescription = [
+  `Runs 2-${PARALLEL_LIMIT} independent subtasks at once, each in its own subagent session, waits for all of them, and returns every outcome.`,
+  `Use it instead of ${name} when a task splits into parts that do not depend on each other: the wall-clock time is roughly the longest subtask instead of the sum.`,
+  "Each subtask starts with a fresh context, so give each a self-contained prompt that says exactly what to do and what to return.",
+  "Do not run subtasks that write to the same files: parallel edits to shared files conflict.",
+  "Each outcome is completed, running (moved to the background; you are notified when it finishes) or error, which carries its failure in place of the output and the sessionID to continue it when there is one.",
+  "Set a subtask's output to the fields you need back when you will act on its answer: that is what makes several answers integrable side by side.",
+].join("\n")
+
 export const Plugin = {
   id: "opencode.tool.subagent",
   effect: Effect.fn("SubagentTool.Plugin")(function* (ctx: Context) {
@@ -102,8 +138,174 @@ export const Plugin = {
       return ref
     })
 
+    // Depth and agent checks, before anything is created. A fan-out runs them for every subtask first,
+    // so a bad entry never leaves sessions behind for its siblings.
+    const prepare = Effect.fn("SubagentTool.prepare")(function* (agentName: string, context: Tool.Context) {
+      const parent = yield* sessions
+        .get(context.sessionID)
+        .pipe(
+          Effect.mapError(
+            (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
+          ),
+        )
+      let current = parent
+      let depth = 0
+      while (current.parentID) {
+        depth++
+        current = yield* sessions
+          .get(current.parentID)
+          .pipe(
+            Effect.mapError(
+              (error) => new ToolFailure({ message: `Parent session not found: ${current.parentID}`, error }),
+            ),
+          )
+      }
+      const limit = Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? 1
+      if (depth >= limit)
+        return yield* new ToolFailure({
+          message: `Subagent depth limit reached (${limit}). Increase "experimental.subagent_depth" to allow nested subagents.`,
+        })
+      const agent = yield* agents.resolve(agentName)
+      if (agent === undefined) return yield* new ToolFailure({ message: `Unknown agent: ${agentName}` })
+      if (agent.mode === "primary")
+        return yield* new ToolFailure({ message: `Agent ${agentName} cannot run as a subagent` })
+      return { parent, agent }
+    })
+
+    const authorize = (agent: Agent.Info, context: Tool.Context) =>
+      permission
+        .assert({
+          action: name,
+          resources: [agent.id],
+          save: [agent.id],
+          sessionID: context.sessionID,
+          agent: context.agent,
+          source: {
+            type: "tool",
+            messageID: context.messageID,
+            id: context.id,
+          },
+        })
+        .pipe(Effect.mapError((error) => new ToolFailure({ message: `Subagent denied: ${agent.id}`, error })))
+
+    const launch = Effect.fn("SubagentTool.launch")(function* (
+      input: typeof Input.Type,
+      context: Tool.Context,
+      prepared: Effect.Success<ReturnType<typeof prepare>>,
+    ) {
+      const parent = prepared.parent
+      const agent = prepared.agent
+      const existing =
+        input.sessionID === undefined
+          ? undefined
+          : yield* sessions
+              .get(input.sessionID)
+              .pipe(
+                Effect.mapError(
+                  (error) => new ToolFailure({ message: `Subagent session not found: ${input.sessionID}`, error }),
+                ),
+              )
+      if (existing !== undefined && existing.parentID !== context.sessionID)
+        return yield* new ToolFailure({
+          message: `Session ${existing.id} is not a child of the current session`,
+        })
+      const override = input.model === undefined ? undefined : yield* resolveModel(input.model)
+      // Continuing with a different agent switches the child, mirroring create semantics
+      // where an explicit model wins over the agent's configured model, which wins over the inherited one.
+      if (existing !== undefined) {
+        const switched = existing.agent !== agent.id
+        const model = override ?? (switched ? agent.model : undefined)
+        yield* Effect.all([
+          switched ? sessions.switchAgent({ sessionID: existing.id, agent: agent.id }) : Effect.void,
+          model === undefined ? Effect.void : sessions.switchModel({ sessionID: existing.id, model }),
+        ]).pipe(
+          Effect.mapError(
+            (error) => new ToolFailure({ message: `Failed to switch subagent session: ${existing.id}`, error }),
+          ),
+        )
+      }
+
+      const model = override ?? agent.model ?? parent.model
+      const child =
+        existing ??
+        (yield* sessions
+          .create({
+            parentID: context.sessionID,
+            title: input.description,
+            agent: Agent.ID.make(input.agent),
+            model,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
+            ),
+          ))
+
+      const background = input.background === true
+      yield* context.progress({ sessionID: child.id, status: "running" })
+
+      // Standard prompt admission outside the job: Job.start joining a running child skips
+      // its run effect, and the default wake starts an idle child or steers a running one.
+      yield* sessions
+        .prompt({
+          sessionID: child.id,
+          text: [
+            ...(existing === undefined ? ["You are a subagent spawned by another session."] : []),
+            input.prompt,
+            ...(input.output?.length ? ["", SubagentOutput.instruction(input.output)] : []),
+          ].join("\n"),
+          ...(background && existing === undefined ? { resume: false } : {}),
+        })
+        .pipe(Effect.mapError((error) => new ToolFailure({ message: `Failed to prompt subagent: ${child.id}`, error })))
+
+      const recovery = {
+        kind: "subagent" as const,
+        parentSessionID: context.sessionID,
+        childSessionID: child.id,
+        agent: agent.name,
+        description: input.description,
+        ...(input.output?.length ? { output: input.output } : {}),
+      }
+      yield* subagents.start(recovery)
+
+      if (background) {
+        yield* subagents.background(recovery)
+        return backgroundResult(child.id)
+      }
+
+      const result = yield* jobs.block({ id: child.id, sessionID: context.sessionID }).pipe(
+        Effect.onInterrupt(() =>
+          Effect.all([sessions.interrupt(child.id), jobs.cancel(child.id)], {
+            discard: true,
+          }),
+        ),
+      )
+      if (result?.type === "backgrounded") {
+        yield* subagents.notify(recovery, result.info.started_at)
+        return backgroundResult(child.id)
+      }
+      // Failure surfaces keep the sessionID visible so the model can continue the child.
+      if (result?.info.status === "error")
+        return yield* new ToolFailure({
+          message: `Subagent failed (sessionID: ${child.id}): ${result.info.error ?? "unknown error"}`,
+        })
+      if (result?.info.status === "cancelled")
+        return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child.id})` })
+      const checked = SubagentCompletion.declared(
+        result?.info.output ?? SubagentCompletion.NO_TEXT,
+        input.output,
+        child.id,
+      )
+      if (!checked.ok) return yield* new ToolFailure({ message: checked.message })
+      return {
+        sessionID: child.id,
+        status: "completed" as const,
+        output: checked.text,
+      }
+    })
+
     yield* ctx.tool
-      .transform((editor) =>
+      .transform((editor) => {
         editor.add({
           name,
           options: { codemode: false },
@@ -112,161 +314,9 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              const parent = yield* sessions
-                .get(context.sessionID)
-                .pipe(
-                  Effect.mapError(
-                    (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
-                  ),
-                )
-              let current = parent
-              let depth = 0
-              while (current.parentID) {
-                depth++
-                current = yield* sessions
-                  .get(current.parentID)
-                  .pipe(
-                    Effect.mapError(
-                      (error) => new ToolFailure({ message: `Parent session not found: ${current.parentID}`, error }),
-                    ),
-                  )
-              }
-              const limit = Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? 1
-              if (depth >= limit)
-                return yield* new ToolFailure({
-                  message: `Subagent depth limit reached (${limit}). Increase "experimental.subagent_depth" to allow nested subagents.`,
-                })
-              const agent = yield* agents.resolve(input.agent)
-              if (agent === undefined) return yield* new ToolFailure({ message: `Unknown agent: ${input.agent}` })
-              if (agent.mode === "primary")
-                return yield* new ToolFailure({ message: `Agent ${input.agent} cannot run as a subagent` })
-              yield* permission
-                .assert({
-                  action: name,
-                  resources: [agent.id],
-                  save: [agent.id],
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  source: {
-                    type: "tool",
-                    messageID: context.messageID,
-                    id: context.id,
-                  },
-                })
-                .pipe(Effect.mapError((error) => new ToolFailure({ message: `Subagent denied: ${agent.id}`, error })))
-
-              const existing =
-                input.sessionID === undefined
-                  ? undefined
-                  : yield* sessions
-                      .get(input.sessionID)
-                      .pipe(
-                        Effect.mapError(
-                          (error) =>
-                            new ToolFailure({ message: `Subagent session not found: ${input.sessionID}`, error }),
-                        ),
-                      )
-              if (existing !== undefined && existing.parentID !== context.sessionID)
-                return yield* new ToolFailure({
-                  message: `Session ${existing.id} is not a child of the current session`,
-                })
-              const override = input.model === undefined ? undefined : yield* resolveModel(input.model)
-              // Continuing with a different agent switches the child, mirroring create semantics
-              // where an explicit model wins over the agent's configured model, which wins over the inherited one.
-              if (existing !== undefined) {
-                const switched = existing.agent !== agent.id
-                const model = override ?? (switched ? agent.model : undefined)
-                yield* Effect.all([
-                  switched ? sessions.switchAgent({ sessionID: existing.id, agent: agent.id }) : Effect.void,
-                  model === undefined ? Effect.void : sessions.switchModel({ sessionID: existing.id, model }),
-                ]).pipe(
-                  Effect.mapError(
-                    (error) => new ToolFailure({ message: `Failed to switch subagent session: ${existing.id}`, error }),
-                  ),
-                )
-              }
-
-              const model = override ?? agent.model ?? parent.model
-              const child =
-                existing ??
-                (yield* sessions
-                  .create({
-                    parentID: context.sessionID,
-                    title: input.description,
-                    agent: Agent.ID.make(input.agent),
-                    model,
-                  })
-                  .pipe(
-                    Effect.mapError(
-                      (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
-                    ),
-                  ))
-
-              const background = input.background === true
-              yield* context.progress({ sessionID: child.id, status: "running" })
-
-              // Standard prompt admission outside the job: Job.start joining a running child skips
-              // its run effect, and the default wake starts an idle child or steers a running one.
-              yield* sessions
-                .prompt({
-                  sessionID: child.id,
-                  text: [
-                    ...(existing === undefined ? ["You are a subagent spawned by another session."] : []),
-                    input.prompt,
-                    ...(input.output?.length ? ["", SubagentOutput.instruction(input.output)] : []),
-                  ].join("\n"),
-                  ...(background && existing === undefined ? { resume: false } : {}),
-                })
-                .pipe(
-                  Effect.mapError(
-                    (error) => new ToolFailure({ message: `Failed to prompt subagent: ${child.id}`, error }),
-                  ),
-                )
-
-              const recovery = {
-                kind: "subagent" as const,
-                parentSessionID: context.sessionID,
-                childSessionID: child.id,
-                agent: agent.name,
-                description: input.description,
-                ...(input.output?.length ? { output: input.output } : {}),
-              }
-              yield* subagents.start(recovery)
-
-              if (background) {
-                yield* subagents.background(recovery)
-                return backgroundResult(child.id)
-              }
-
-              const result = yield* jobs.block({ id: child.id, sessionID: context.sessionID }).pipe(
-                Effect.onInterrupt(() =>
-                  Effect.all([sessions.interrupt(child.id), jobs.cancel(child.id)], {
-                    discard: true,
-                  }),
-                ),
-              )
-              if (result?.type === "backgrounded") {
-                yield* subagents.notify(recovery, result.info.started_at)
-                return backgroundResult(child.id)
-              }
-              // Failure surfaces keep the sessionID visible so the model can continue the child.
-              if (result?.info.status === "error")
-                return yield* new ToolFailure({
-                  message: `Subagent failed (sessionID: ${child.id}): ${result.info.error ?? "unknown error"}`,
-                })
-              if (result?.info.status === "cancelled")
-                return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child.id})` })
-              const checked = SubagentCompletion.declared(
-                result?.info.output ?? SubagentCompletion.NO_TEXT,
-                input.output,
-                child.id,
-              )
-              if (!checked.ok) return yield* new ToolFailure({ message: checked.message })
-              return {
-                sessionID: child.id,
-                status: "completed" as const,
-                output: checked.text,
-              }
+              const prepared = yield* prepare(input.agent, context)
+              yield* authorize(prepared.agent, context)
+              return yield* launch(input, context, prepared)
             }).pipe(
               Effect.map((output) => ({
                 output,
@@ -277,8 +327,66 @@ export const Plugin = {
                 metadata: { sessionID: output.sessionID, status: output.status },
               })),
             ),
-        }),
-      )
+        })
+        // Visible wherever the subagent tool is: a rule that hides one hides both.
+        editor.add({
+          name: parallelName,
+          options: { codemode: false, permission: name },
+          description: parallelDescription,
+          input: ParallelInput,
+          output: ParallelOutput,
+          execute: (input, context) =>
+            Effect.gen(function* () {
+              if (input.tasks.length < 2 || input.tasks.length > PARALLEL_LIMIT)
+                return yield* new ToolFailure({
+                  message: `tasks must hold between 2 and ${PARALLEL_LIMIT} subtasks; use ${name} for a single one`,
+                })
+              const prepared = yield* Effect.forEach(input.tasks, (task) => prepare(task.agent, context))
+              // Asked one at a time before anything starts, so the person sees one question at a time.
+              yield* Effect.forEach(prepared, (item) => authorize(item.agent, context), { discard: true })
+              const tasks = yield* Effect.forEach(
+                input.tasks,
+                (task, index) =>
+                  launch(task, context, prepared[index]).pipe(
+                    Effect.map((output) => ({
+                      description: task.description,
+                      sessionID: output.sessionID,
+                      state: output.status,
+                      output: output.output,
+                    })),
+                    // One subtask failing is that subtask's outcome; its siblings still report theirs.
+                    Effect.catchTag("Tool.Error", (failure) =>
+                      Effect.succeed({
+                        description: task.description,
+                        state: "error" as const,
+                        output: failure.message,
+                      }),
+                    ),
+                  ),
+                { concurrency: "unbounded" },
+              )
+              return { tasks }
+            }).pipe(
+              Effect.map((output) => ({
+                output,
+                content: [
+                  "<subagents>",
+                  ...output.tasks.map(
+                    (task) =>
+                      `<subagent${"sessionID" in task ? ` sessionID="${task.sessionID}"` : ""} state="${task.state}" description="${task.description}">\n${task.output}\n</subagent>`,
+                  ),
+                  "</subagents>",
+                ].join("\n"),
+                metadata: {
+                  tasks: output.tasks.map((task) => ({
+                    ...("sessionID" in task ? { sessionID: task.sessionID } : {}),
+                    state: task.state,
+                  })),
+                },
+              })),
+            ),
+        })
+      })
       .pipe(Effect.orDie)
 
     yield* ctx.tool.hook("execute.before", (event) =>
@@ -294,8 +402,8 @@ export const Plugin = {
 
     const hook = (event: SessionHooks["context"]) =>
       Effect.gen(function* () {
-        const tool = event.tools[name]
-        if (!tool) return
+        const tools = [event.tools[name], event.tools[parallelName]].filter((tool) => tool !== undefined)
+        if (tools.length === 0) return
         const selected = yield* agents.resolve(event.agent)
         if (!selected) return
         const available = (yield* agents.list())
@@ -307,15 +415,17 @@ export const Plugin = {
           )
           .toSorted((a, b) => a.id.localeCompare(b.id))
         if (available.length === 0) return
-        tool.description = [
-          tool.description,
-          "",
-          "Available subagents:",
-          ...available.map(
-            (agent) =>
-              `- ${agent.id}: ${agent.description ?? "This subagent should only be called when explicitly requested."}`,
-          ),
-        ].join("\n")
+        tools.forEach((tool) => {
+          tool.description = [
+            tool.description,
+            "",
+            "Available subagents:",
+            ...available.map(
+              (agent) =>
+                `- ${agent.id}: ${agent.description ?? "This subagent should only be called when explicitly requested."}`,
+            ),
+          ].join("\n")
+        })
       })
     yield* ctx.session.hook("context", hook)
     yield* ctx.session.hook("compaction", hook)

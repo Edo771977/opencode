@@ -394,6 +394,111 @@ describe("SubagentTool", () => {
     ),
   )
 
+  // The fan-out runs its subtasks at once and reports each on its own: one that misses its declared
+  // fields is an error beside a sibling that completed, not a failure of the whole call.
+  completionIt.live("runs subtasks at the same time and reports each outcome on its own", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const llm = yield* TestLLM.Test
+          const parent = yield* sessions.create({
+            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
+            model: parentModel,
+          })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          yield* llm.serve((request) =>
+            JSON.stringify(request.messages).includes("ALPHA")
+              ? TestLLM.text('Counted.\n```json\n{ "count": 3 }\n```', "alpha")
+              : TestLLM.text("Nothing structured here.", "beta"),
+          )
+          const count = [{ name: "count", description: "How many", type: "number" as const }]
+          const gate = yield* llm.gate()
+          const run = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-parallel",
+              name: SubagentTool.parallelName,
+              input: {
+                tasks: [
+                  { agent: "reviewer", description: "alpha", prompt: "ALPHA", output: count },
+                  { agent: "reviewer", description: "beta", prompt: "BETA", output: count },
+                ],
+              },
+            },
+          }).pipe(Effect.forkChild)
+          // Both children reach the model while the gate holds the first: they run at the same time.
+          yield* gate.started
+          yield* gate.started.pipe(Effect.timeout("10 seconds"))
+          yield* gate.release
+          const result = yield* Fiber.join(run)
+
+          expect(result).toMatchObject({ status: "completed" })
+          const text =
+            result.status === "completed"
+              ? (result.content ?? []).map((part) => ("text" in part ? part.text : "")).join("")
+              : ""
+          expect(text).toMatch(
+            /<subagent sessionID="ses_\w+" state="completed" description="alpha">\n\{\n  "count": 3\n\}\n<\/subagent>/,
+          )
+          expect(text).toMatch(
+            /<subagent state="error" description="beta">\nSubagent did not return the requested fields \(sessionID: ses_\w+\)/,
+          )
+        }),
+      ),
+    ),
+  )
+
+  completionIt.live("checks every subtask before starting any, and keeps to two to five", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({
+            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
+            model: parentModel,
+          })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const fanOut = (id: string, tasks: ReadonlyArray<{ agent: string; description: string; prompt: string }>) =>
+            executeTool(registry, {
+              sessionID: parent.id,
+              ...toolIdentity,
+              call: { type: "tool-call", id, name: SubagentTool.parallelName, input: { tasks } },
+            })
+          const task = (agent: string) => ({ agent, description: agent, prompt: "work" })
+
+          expect(yield* fanOut("call-one", [task("reviewer")])).toMatchObject({ status: "error" })
+          expect(
+            yield* fanOut(
+              "call-six",
+              Array.from({ length: 6 }, () => task("reviewer")),
+            ),
+          ).toMatchObject({
+            status: "error",
+          })
+          // A bad entry late in the list is found before its siblings get sessions of their own.
+          expect(yield* fanOut("call-unknown", [task("reviewer"), task("nonexistent")])).toMatchObject({
+            status: "error",
+            error: { message: "Unknown agent: nonexistent" },
+          })
+          expect((yield* sessions.list()).data.filter((session) => session.parentID === parent.id)).toEqual([])
+        }),
+      ),
+    ),
+  )
+
   completionIt.live("admits one durable completion across live delivery and restart replay", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),
