@@ -29,6 +29,7 @@ import { promptOffsetWidth } from "../../prompt/display"
 import { expandPromptInputPastedText, realignPromptInputMentions } from "../../prompt/mention"
 import { parseSlashHead } from "../../prompt/parse"
 import { stringWidth } from "../../util/string-width"
+import { applyListAction, cleanupForSubmit, handleBackspace, handleNewline, indexAtColumn } from "../list-continuation"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
 import { saveDraft, takeDraft } from "./draft-stash"
@@ -1088,6 +1089,52 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  // Numbered lists continue on a newline, and backspace drops a marker left empty. Only for a prompt
+  // with no attached parts: the edit replaces the text, and pasted or file parts are marks anchored in it.
+  const listEditable = () => input !== undefined && input.extmarks.getAllForTypeId(promptPartTypeId).length === 0
+  const editList = (compute: typeof handleNewline) => {
+    if (!listEditable()) return false
+    const text = input.plainText
+    const cursor = indexAtColumn(text, input.cursorOffset)
+    const action = compute(text, cursor)
+    if (!action) return false
+    const next = applyListAction(text, cursor, action)
+    input.setText(next.text)
+    input.cursorOffset = stringWidth(next.text.slice(0, next.cursor))
+    setStore("prompt", "text", next.text)
+  }
+
+  Keymap.createLayer(() => {
+    return {
+      priority: 1,
+      target: inputTarget,
+      enabled: (() => {
+        cursorVersion()
+        return (
+          inputTarget() !== undefined &&
+          !disabled() &&
+          !auto()?.visible &&
+          store.mode === "normal" &&
+          input !== undefined
+        )
+      })(),
+      commands: [
+        {
+          id: "input.newline",
+          title: "Insert newline, continuing a numbered list",
+          group: "Prompt",
+          run: () => editList(handleNewline),
+        },
+        {
+          id: "input.backspace",
+          title: "Backspace, clearing an empty list marker",
+          group: "Prompt",
+          run: () => editList(handleBackspace),
+        },
+      ],
+    }
+  })
+
   let submitting = false
   async function submit(delivery: SessionInbox.Delivery = "steer") {
     if (disabled()) return false
@@ -1113,6 +1160,12 @@ export function Prompt(props: PromptProps) {
     if (input && !input.isDestroyed && input.plainText !== store.prompt.text) {
       setStore("prompt", "text", input.plainText)
       syncExtmarksWithPromptParts()
+    }
+    // A list item left empty at the end is a marker the newline put there, not something to send.
+    const cleaned = store.mode === "normal" && listEditable() ? cleanupForSubmit(store.prompt.text) : store.prompt.text
+    if (cleaned !== store.prompt.text) {
+      input.setText(cleaned)
+      setStore("prompt", "text", cleaned)
     }
     if (move.creating()) return false
     if (auto()?.visible) return false
