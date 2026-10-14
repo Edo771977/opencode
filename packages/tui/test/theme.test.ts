@@ -129,6 +129,32 @@ test("custom theme precedence follows directory order", async () => {
   await expect(discoverThemes([global, project])).resolves.toEqual({ custom: { source: "project" } })
 })
 
+test("custom themes may be JSONC, with comments and trailing commas", async () => {
+  await using tmp = await tmpdir()
+  const directory = path.join(tmp.path, "global")
+  await mkdir(path.join(directory, "themes"), { recursive: true })
+  await writeFile(
+    path.join(directory, "themes", "commented.jsonc"),
+    ['{', '  // the accent everyone asks about', '  "source": "jsonc",', '}'].join("\n"),
+  )
+  await writeFile(path.join(directory, "themes", "plain.json"), JSON.stringify({ source: "json" }))
+
+  await expect(discoverThemes([directory])).resolves.toEqual({
+    commented: { source: "jsonc" },
+    plain: { source: "json" },
+  })
+})
+
+test("a custom theme that does not parse names the file and the place", async () => {
+  await using tmp = await tmpdir()
+  const directory = path.join(tmp.path, "global")
+  await mkdir(path.join(directory, "themes"), { recursive: true })
+  const file = path.join(directory, "themes", "broken.jsonc")
+  await writeFile(file, '{\n  "source": \n}')
+
+  await expect(discoverThemes([directory])).rejects.toThrow(`Failed to parse theme ${file}:3:1: ValueExpected`)
+})
+
 test("theme directories include global config before project directories", async () => {
   await using tmp = await tmpdir()
   const global = path.join(tmp.path, "global")

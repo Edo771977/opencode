@@ -80,16 +80,16 @@ Its relevant structure looks like this:
 }
 ```
 
-Then select `ocean` in settings or set `theme.name` to `ocean` in `cli.json`. The filename, without `.json`, is the
-theme name.
+Then select `ocean` in settings or set `theme.name` to `ocean` in `cli.json`. The filename, without `.json` or `.jsonc`, is
+the theme name.
 
 | Scope   | Directory                                  |
 | ------- | ------------------------------------------ |
 | Global  | `~/.config/opencode/themes/`               |
 | Project | `.opencode/themes/` in the project tree    |
 
-OpenCode reads `.json` files only. A theme closer to the current directory replaces a global or parent theme with the
-same name.
+OpenCode reads `.json` and `.jsonc` files, so a theme may carry comments and trailing commas. A theme closer to the
+current directory replaces a global or parent theme with the same name, and in one directory `.jsonc` wins over `.json`.
 
 ## Format
 
