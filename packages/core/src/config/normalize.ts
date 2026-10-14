@@ -643,10 +643,21 @@ function migrateProviders(value: unknown, diagnostics: Diagnostic[]) {
       },
     ]
   })
+  // The canonical name outranks a retired alias for the same provider whether or not it reads: a
+  // malformed `azure` must not hand the provider to the `azure-cognitive-services` it replaced.
+  const authored = new Set(Object.keys(value).filter((name) => ConfigMigrateV1.providerID(name) === name))
   const current = new Set(candidates.filter((item) => item.name === item.destination).map((item) => item.destination))
   const result: Record<string, unknown> = {}
   candidates.forEach((item) => {
-    if (item.name !== item.destination && current.has(item.destination)) return
+    if (item.name !== item.destination && authored.has(item.destination)) {
+      if (!current.has(item.destination))
+        diagnostics.push({
+          kind: "invalid",
+          path: ["provider", item.name],
+          message: "dropped the legacy value a malformed setting overrides",
+        })
+      return
+    }
     setOwn(result, item.destination, item.provider)
   })
   return result

@@ -275,18 +275,24 @@ describe("ConfigNormalize", () => {
     })
   })
 
-  test("uses a valid retired provider alias when the canonical legacy entry is malformed", () => {
+  // This fork's rule, not upstream's: the canonical name outranks the retired alias whether or not it
+  // reads, so a malformed `azure` never hands the provider to `azure-cognitive-services`.
+  test("drops a retired provider alias when the canonical legacy entry it gave way to is malformed", () => {
     const result = normalized({
       provider: {
         "azure-cognitive-services": { models: { deployment: {} } },
         azure: { env: [1] },
       },
     })
-    expect(result.encoded.providers).toHaveProperty("azure.models.deployment")
-    expect(result.diagnostics.filter((item) => item.kind === "invalid").map((item) => item.path)).toContainEqual([
-      "provider",
-      "azure",
+    expect(result.encoded.providers).toEqual({})
+    expect(result.diagnostics.filter((item) => item.kind === "invalid").map((item) => item.path)).toEqual([
+      ["provider", "azure"],
+      ["provider", "azure-cognitive-services"],
     ])
+    // Written alone, the alias still migrates to the canonical name.
+    expect(
+      normalized({ provider: { "azure-cognitive-services": { models: { deployment: {} } } } }).encoded.providers,
+    ).toHaveProperty("azure.models.deployment")
   })
 
   test("preserves permission source order and appends native rules", () => {
