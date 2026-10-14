@@ -44,6 +44,15 @@ function withoutEmptyCompatibilityContainers(input: Record<string, unknown>) {
       delete compaction.keep
     if (!originallyEmpty && !Object.keys(compaction).length) delete result.compaction
   }
+  // Deprecated experimental policies normalize into top-level policies.
+  if (typeof result.experimental === "object" && result.experimental !== null && !Array.isArray(result.experimental)) {
+    const experimental = result.experimental as Record<string, unknown>
+    if (Array.isArray(experimental.policies)) {
+      result.policies = [...experimental.policies, ...(Array.isArray(result.policies) ? result.policies : [])]
+      delete experimental.policies
+      if (!Object.keys(experimental).length) delete result.experimental
+    }
+  }
   return result
 }
 
@@ -56,7 +65,7 @@ describe("ConfigNormalize", () => {
     ] as const
     const result = normalized({ experimental: { policies } })
     expect(result.diagnostics).toEqual([])
-    expect(Schema.decodeUnknownSync(Info)(result.encoded).experimental?.policies).toEqual(policies)
+    expect(Schema.decodeUnknownSync(Info)(result.encoded).policies).toEqual(policies)
   })
 
   test("drops unsupported policy actions without losing supported policies", () => {
@@ -70,7 +79,7 @@ describe("ConfigNormalize", () => {
         ],
       },
     })
-    expect(Schema.decodeUnknownSync(Info)(result.encoded).experimental?.policies).toEqual([supported])
+    expect(Schema.decodeUnknownSync(Info)(result.encoded).policies).toEqual([supported])
     expect(result.diagnostics.map((diagnostic) => diagnostic.path)).toEqual([
       ["experimental", "policies", "0"],
       ["experimental", "policies", "2"],
@@ -475,40 +484,45 @@ describe("ConfigNormalize", () => {
   })
 
   test("distinguishes empty, mixed, and wholly malformed enabled provider lists", () => {
-    expect(normalized({ enabled_providers: [] }).encoded.experimental).toEqual({
-      policies: [{ action: "provider.use", resource: "*", effect: "deny" }],
-    })
-    expect(normalized({ enabled_providers: [1, "anthropic", false] }).encoded.experimental).toEqual({
-      policies: [
-        { action: "provider.use", resource: "*", effect: "deny" },
-        { action: "provider.use", resource: "anthropic", effect: "allow" },
-      ],
-    })
-    expect(normalized({ enabled_providers: [1, false] }).encoded.experimental).toBeUndefined()
-    expect(normalized({ enabled_providers: "anthropic" }).encoded.experimental).toBeUndefined()
+    expect(normalized({ enabled_providers: [] }).encoded.policies).toEqual([
+      { action: "provider.use", resource: "*", effect: "deny" },
+    ])
+    expect(normalized({ enabled_providers: [1, "anthropic", false] }).encoded.policies).toEqual([
+      { action: "provider.use", resource: "*", effect: "deny" },
+      { action: "provider.use", resource: "anthropic", effect: "allow" },
+    ])
+    expect(normalized({ enabled_providers: [1, false] }).encoded.policies).toBeUndefined()
+    expect(normalized({ enabled_providers: "anthropic" }).encoded.policies).toBeUndefined()
   })
 
-  test("appends native policies after migrated provider policies", () => {
+  test("merges migrated, experimental, and native policies in order", () => {
     expect(
       normalized({
         enabled_providers: ["anthropic"],
         disabled_providers: ["openai"],
+        policies: [{ action: "provider.use", resource: "native", effect: "deny" }],
         experimental: {
           portable_shell_scanner: true,
           subagent_depth: 0,
           policies: [{ action: "provider.use", resource: "custom", effect: "allow" }],
         },
-      }).encoded.experimental,
-    ).toEqual({
-      portable_shell_scanner: true,
-      subagent_depth: 0,
+      }).encoded,
+    ).toMatchObject({
+      experimental: { portable_shell_scanner: true, subagent_depth: 0 },
       policies: [
         { action: "provider.use", resource: "*", effect: "deny" },
         { action: "provider.use", resource: "anthropic", effect: "allow" },
         { action: "provider.use", resource: "openai", effect: "deny" },
         { action: "provider.use", resource: "custom", effect: "allow" },
+        { action: "provider.use", resource: "native", effect: "deny" },
       ],
     })
+  })
+
+  test("never emits experimental policies", () => {
+    expect(
+      normalized({ experimental: { policies: [{ action: "provider.use", resource: "*", effect: "deny" }] } }).encoded,
+    ).toEqual({ policies: [{ action: "provider.use", resource: "*", effect: "deny" }] })
   })
 
   test("reports unsupported legacy settings without including their values", () => {
@@ -681,6 +695,15 @@ describe("ConfigNormalize", () => {
 
   // An agent key the V1 schema does not name is a provider option and goes out with every request,
   // so this fork's own V1 agent settings have to be named to land where they belong.
+  test("drops a spend limit that is not a positive amount, and says so, keeping the agent", () => {
+    const result = normalized({ agent: { build: { prompt: "kept", budget: 0, budget_stop: -1 } } })
+    expect(result.encoded.agents).toEqual({ build: { system: "kept" } })
+    expect(result.diagnostics.map((item) => item.path)).toEqual([
+      ["agent", "build", "budget"],
+      ["agent", "build", "budget_stop"],
+    ])
+  })
+
   test("carries the fork's agent settings out of a V1 file, and keeps them out of the request body", () => {
     const result = normalized({
       agent: { build: { small: true, budget: 2, budget_stop: 5, temperature: 0.2 } },
@@ -799,7 +822,7 @@ describe("ConfigNormalize", () => {
           ],
         },
       })
-      expect(Schema.decodeUnknownSync(Info)(result.encoded).experimental?.policies).toEqual([
+      expect(Schema.decodeUnknownSync(Info)(result.encoded).policies).toEqual([
         { action: "tool.use", effect: "allow", resource: "shell:*" },
         { action: "tool.use", effect: "deny", resource: "shell:rm *" },
         { action: "provider.use", effect: "deny", resource: "*" },

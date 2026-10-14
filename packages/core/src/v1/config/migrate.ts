@@ -50,13 +50,18 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
         color: info.color === undefined ? undefined : info.color.startsWith("#") ? info.color : "#aaaaaa",
         steps: info.steps,
         small: info.small,
-        budget: info.budget,
-        budget_stop: info.budget_stop,
+        // Only a positive amount is a limit; `normalize` reports the one dropped here.
+        budget: positive(info.budget),
+        budget_stop: positive(info.budget_stop),
         disabled: info.disable,
         permissions: permissions(info.permission),
       }),
     ),
   )
+}
+
+function positive(value: number | undefined) {
+  return value !== undefined && value > 0 ? value : undefined
 }
 
 export function migrateCommand(command: ConfigCommandV1.Info) {
@@ -119,7 +124,7 @@ function migrateStandardProvider(info: ConfigProviderV1.Info) {
   return {
     name: info.name,
     env: info.env,
-    package: info.npm ? Provider.aisdk(info.npm) : undefined,
+    package: info.npm ? packageSpecifier(info.npm) : undefined,
     compatibility: setCacheKey === undefined ? undefined : { supportsPromptCacheKey: setCacheKey },
     settings: info.api ? { ...options.settings, baseURL: info.api } : info.options ? options.settings : undefined,
     headers: info.options && options.headers,
@@ -163,6 +168,12 @@ function migrateGoogleVertexAnthropicProvider(info: ConfigProviderV1.Info) {
         ]),
       ),
   }
+}
+
+// Built-in provider routes are already native package specifiers; only npm packages load through the AI SDK.
+function packageSpecifier(npm: string) {
+  const name = Provider.packageName(npm)
+  return name.startsWith("@opencode/ai/") ? name : Provider.aisdk(npm)
 }
 
 // Renames retired provider IDs in V1 fields and the shared top-level model.
@@ -232,7 +243,7 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, npm: string | un
     compatibility: disableThinkingBlockBinding
       ? { ...compatibility, supportsThinkingBlockBinding: false }
       : compatibility,
-    package: info.provider?.npm ? Provider.aisdk(info.provider.npm) : undefined,
+    package: info.provider?.npm ? packageSpecifier(info.provider.npm) : undefined,
     settings: info.provider?.api ? { ...settings, baseURL: info.provider.api } : settings,
     capabilities,
     headers: info.headers,

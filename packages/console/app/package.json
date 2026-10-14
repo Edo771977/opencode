@@ -1,11 +1,12 @@
 {
   "name": "@opencode/console-app",
-  "version": "2.0.28",
+  "version": "2.0.29",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "dev": "vite dev --host 0.0.0.0",
+    "dev:enterprise": "bun --watch script/dev-enterprise.ts",
     "dev:remote": "bun sst shell --stage=dev bun dev",
     "build": "bun ./script/generate-sitemap.ts && vite build",
     "start": "vite start"

@@ -197,6 +197,7 @@ export function normalize(input: unknown): Result {
   normalizeSkills(input, encoded, diagnostics)
   normalizeMcp(input, encoded, diagnostics)
   normalizeCompaction(input, encoded, diagnostics)
+  normalizePolicies(input, encoded, diagnostics)
   normalizeExperimental(input, encoded, diagnostics)
   normalizeWatcher(input, encoded, diagnostics)
   normalizeFormatter(input, encoded, diagnostics)
@@ -404,12 +405,13 @@ function normalizeCompaction(
   if (Object.keys(result).length || !Object.keys(input.compaction).length) encoded.compaction = result
 }
 
-function normalizeExperimental(
+// V1 provider lists and `experimental.policies` stay supported and merge into
+// top-level `policies`; within a document, later sources win ties.
+function normalizePolicies(
   input: Record<string, unknown>,
   encoded: Record<string, unknown>,
   diagnostics: Diagnostic[],
 ) {
-  const result: Record<string, unknown> = {}
   const generated: unknown[] = []
   const enabled = decodeProviderList(input, "enabled_providers", diagnostics)
   if (enabled.present && (!enabled.nonEmpty || enabled.values.length)) {
@@ -430,7 +432,26 @@ function normalizeExperimental(
       effect: "deny",
     })),
   )
-  const native: unknown[] = []
+  const experimental = isRecord(input.experimental)
+    ? policies(input.experimental.policies, ["experimental", "policies"], diagnostics)
+    : []
+  const native = policies(input.policies, ["policies"], diagnostics)
+  if (
+    generated.length ||
+    experimental.length ||
+    native.length ||
+    Array.isArray(input.policies) ||
+    (isRecord(input.experimental) && Array.isArray(input.experimental.policies))
+  )
+    encoded.policies = [...generated, ...experimental, ...native]
+}
+
+function normalizeExperimental(
+  input: Record<string, unknown>,
+  encoded: Record<string, unknown>,
+  diagnostics: Diagnostic[],
+) {
+  const result: Record<string, unknown> = {}
   if (own(input, "experimental")) {
     if (!isRecord(input.experimental)) invalid(["experimental"], diagnostics)
     if (isRecord(input.experimental)) {
@@ -456,11 +477,8 @@ function normalizeExperimental(
         )
         if (value !== undefined) result.subagent_depth = value
       }
-      native.push(...policies(experimental.policies, diagnostics))
     }
   }
-  if (generated.length || native.length || (isRecord(input.experimental) && Array.isArray(input.experimental.policies)))
-    result.policies = [...generated, ...native]
   if (Object.keys(result).length || (isRecord(input.experimental) && !Object.keys(input.experimental).length))
     encoded.experimental = result
 }
@@ -561,23 +579,23 @@ function nativePermissions(value: unknown, diagnostics: Diagnostic[]) {
 
 // Unknown actions are skipped, so that this client still reads a policy file written for a newer one.
 // A known action is one this client enforces, and a policy for it that cannot be read is denied.
-function policies(value: unknown, diagnostics: Diagnostic[]) {
+function policies(value: unknown, path: string[], diagnostics: Diagnostic[]) {
   if (value === undefined) return []
   if (!Array.isArray(value)) {
-    invalid(["experimental", "policies"], diagnostics)
+    invalid(path, diagnostics)
     return []
   }
   const known = Schema.is(ConfigPolicy.Info.fields.action)
   return value.flatMap((item, index) => {
-    const path = ["experimental", "policies", String(index)]
+    const entry = [...path, String(index)]
     const policy = decodeQuietly(ConfigPolicy.Info, item)
     if (policy !== undefined) return [policy]
     const action = isRecord(item) ? item.action : undefined
     if (!known(action)) {
-      invalid(path, diagnostics)
+      invalid(entry, diagnostics)
       return []
     }
-    return [denyUnreadable(action, named(item, "resource"), path, diagnostics)]
+    return [denyUnreadable(action, named(item, "resource"), entry, diagnostics)]
   })
 }
 
@@ -660,12 +678,18 @@ function diagnoseProviderUnsupported(value: unknown, path: string[], diagnostics
   })
 }
 
+const spendLimits = ["budget", "budget_stop"] as const
+
 function diagnoseAgentUnsupported(value: unknown, path: string[], diagnostics: Diagnostic[]) {
   if (!isRecord(value)) return
   Object.entries(value).forEach(([name, agent]) => {
     if (!isRecord(agent)) return
     unsupportedIfPresent(agent, "name", [...path, name, "name"], diagnostics)
     diagnoseSelection(agent, [...path, name], diagnostics)
+    spendLimits.forEach((key) => {
+      if (own(agent, key) && !(typeof agent[key] === "number" && agent[key] > 0))
+        invalid([...path, name, key], diagnostics)
+    })
   })
 }
 
