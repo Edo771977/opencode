@@ -287,6 +287,48 @@ steps: 8
 
 On the final step, OpenCode removes tools and asks the model to summarize in text. New user input resets the allowance.
 
+### Small
+
+`small` runs every step of the agent on a cheaper model without naming one:
+
+```jsonc
+{
+  "agents": {
+    "triage": { "mode": "subagent", "small": true },
+  },
+}
+```
+
+The model is the `title` agent's `model` when it is set and available (a V1 `small_model` migrates there, variant included), else a cheaper model of the session's provider, else the session model. A model that cannot call tools is never picked, nor one that is the session model with the same provider and ID. Only a variant written next to the title model travels with it, and only when that model offers it; the session's variant belongs to the session model. The model that answers a step is the one recorded on the message and the one the step is charged at.
+
+### Budget
+
+`budget` caps what an agent spends in a session, in US dollars. Past it the agent keeps working on the [small model](#small) and is told once. `budget_stop` is a ceiling on one request: past it the agent gets one step without tools, on its own model, to summarize what was done and what is left, and the next message starts over with its tools.
+
+```jsonc
+{
+  "agents": {
+    "build": { "budget": 5 },
+    "researcher": { "mode": "subagent", "budget": 0.5, "budget_stop": 2 },
+  },
+}
+```
+
+Both are counted per agent and checked before each step, so the step that crosses a threshold runs to its end. A request is the message you sent plus what the runtime wrote while answering it, such as a background subagent's result; none of that starts a request of its own. Spend comes from the usage each provider reports, priced at the model that answered each step.
+
+The `budget` permission decides what happens past the budget: `allow` (the default) degrades, `ask` asks once per request and an approved request keeps its model and tools, `deny` ends every request that goes past it. A declined request ends like the ceiling, with the reason you gave passed to the summary. Only a rule that names `budget` counts; a catch-all such as `{ "action": "*", "resource": "*", "effect": "deny" }` is about tools and does not turn a budget into a checkpoint.
+
+```jsonc
+{
+  "agents": {
+    "build": {
+      "budget": 2,
+      "permissions": [{ "action": "budget", "resource": "*", "effect": "ask" }],
+    },
+  },
+}
+```
+
 ### Hidden
 
 `hidden` removes an agent from normal listings, interactive discovery, and the subagent catalog:
@@ -340,3 +382,34 @@ color: "#ff6b6b"
 </Callout>
 
 Do not use legacy top-level fields such as `temperature`, `top_p`, `prompt`, `permission`, `tools`, `disable`, or `maxSteps` in new V2 agent configuration.
+
+## Subagents
+
+### Declared fields
+
+A caller that will act on a subagent's answer can declare the fields it needs back with `output` on the `subagent` tool. The subagent is told to end with one fenced JSON object carrying exactly those fields, and the call fails if it does not, with what was missing, an excerpt of what it did answer, and its `sessionID` so the caller can continue it:
+
+```json
+{
+  "agent": "general",
+  "description": "audit dependencies",
+  "prompt": "Check every direct dependency for a known advisory.",
+  "output": [
+    { "name": "summary", "description": "What was found", "type": "string" },
+    { "name": "advisories", "description": "One entry per affected package", "type": "array" }
+  ]
+}
+```
+
+`type` is one of `string`, `number`, `boolean`, `array` or `object`, or omitted to accept any value. A background subagent's answer is checked the same way when it is delivered.
+
+### Work left running
+
+A subagent that finishes with a background shell or a background subagent of its own still running says so after its answer. That work reports to the subagent's session, not to the caller, so the caller is told where to collect it.
+
+### Parallel subagents
+
+`subagent_parallel` runs two to five independent subtasks at once, each in its own subagent session, and reports every outcome: completed, running if it was moved to the background, or error with its failure and session. Each subtask takes the same `agent`, `description`, `prompt`, `model` and `output` as `subagent`.
+
+Every subtask is checked, and its `subagent` permission asked one at a time, before any starts, so a bad entry never leaves sessions behind for its siblings. A rule that hides `subagent` hides `subagent_parallel` as well, and `experimental.subagent_depth` keeps subagents from fanning out by default.
+
