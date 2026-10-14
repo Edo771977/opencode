@@ -78,9 +78,86 @@ test("scopes sessions to the active session location", async () => {
     return null
   }
 
-  const app = await testRender(
+  const app = await renderList(temporary.path, calls.fetch, Probe)
+  app.renderer.start()
+
+  try {
+    const frame = await app.waitForFrame((value) => value.includes("Project B session"))
+    expect(frame).not.toContain("Project A session")
+    expect(requestedProjects.at(-1)).toBe("proj_b")
+  } finally {
+    app.renderer.destroy()
+    await storage.flush()
+    await temporary[Symbol.asyncDispose]()
+  }
+})
+
+test("files grouped titles under their group, ahead of the dated sessions", async () => {
+  const events = createEventStream()
+  const now = Date.now()
+  const session = (id: string, title: string, updated: number) => ({
+    id,
+    projectID: "proj_a",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated },
+    title,
+    location: { directory: process.cwd() },
+  })
+  const calls = createFetch((url) => {
+    if (url.pathname === "/api/location")
+      return json({
+        directory: process.cwd(),
+        project: { id: "proj_a", directory: process.cwd(), canonical: process.cwd() },
+      })
+    if (url.pathname !== "/api/session") return undefined
+    const parentID = url.searchParams.get("parentID")
+    if (parentID && parentID !== "null") return json({ data: [], cursor: {} })
+    return json({
+      data: [
+        session("ses_loose", "Loose session", now),
+        session("ses_deploy", "Work | deploy", now - 500),
+        session("ses_fix", "work | fix bug", now - 1000),
+        session("ses_groceries", "home | groceries", now - 3000),
+      ],
+      cursor: {},
+    })
+  }, events)
+  const temporary = await tmpdir()
+  let storage!: ReturnType<typeof useStorage>
+
+  function Probe() {
+    const dialog = useDialog()
+    storage = useStorage()
+    onMount(() => dialog.replace(() => <DialogSessionList />))
+    return null
+  }
+
+  const app = await renderList(temporary.path, calls.fetch, Probe)
+  app.renderer.start()
+
+  try {
+    const frame = await app.waitForFrame((value) => value.includes("Loose session"))
+    const order = ["Home:", "groceries", "Work:", "deploy", "fix bug", "Today", "Loose session"].map((text) =>
+      frame.indexOf(text),
+    )
+    expect(order.every((index) => index >= 0)).toBe(true)
+    expect(order).toEqual(order.toSorted((a, b) => a - b))
+    expect(frame).not.toContain("home | groceries")
+
+    app.mockInput.pressKey("r", { ctrl: true })
+    expect(await app.waitForFrame((value) => value.includes("Rename session"))).toContain("home | groceries")
+  } finally {
+    app.renderer.destroy()
+    await storage.flush()
+    await temporary[Symbol.asyncDispose]()
+  }
+})
+
+function renderList(state: string, fetch: Parameters<typeof createApi>[0], Probe: () => null) {
+  return testRender(
     () => (
-      <TestTuiContexts paths={{ state: temporary.path }}>
+      <TestTuiContexts paths={{ state }}>
         <TuiAppProvider value={{ name: "test", version: "test", channel: "test" }}>
           <StorageProvider>
             <ArgsProvider>
@@ -88,7 +165,7 @@ test("scopes sessions to the active session location", async () => {
                 <Keymap.Provider>
                   <ToastProvider>
                     <RouteProvider>
-                      <ClientProvider api={createApi(calls.fetch)}>
+                      <ClientProvider api={createApi(fetch)}>
                         <PermissionProvider>
                           <DataProvider directory={process.cwd()}>
                             <LocationProvider>
@@ -116,15 +193,4 @@ test("scopes sessions to the active session location", async () => {
     ),
     { width: 100, height: 30, kittyKeyboard: true },
   )
-  app.renderer.start()
-
-  try {
-    const frame = await app.waitForFrame((value) => value.includes("Project B session"))
-    expect(frame).not.toContain("Project A session")
-    expect(requestedProjects.at(-1)).toBe("proj_b")
-  } finally {
-    app.renderer.destroy()
-    await storage.flush()
-    await temporary[Symbol.asyncDispose]()
-  }
-})
+}

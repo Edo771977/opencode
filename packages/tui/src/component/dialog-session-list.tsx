@@ -22,6 +22,7 @@ import { useStorage } from "../context/storage"
 import { useConfig } from "../config"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { projectName } from "../util/project"
+import { parseSessionTitle } from "../util/session-title"
 import { useLocation } from "../context/location"
 
 export function DialogSessionList() {
@@ -164,7 +165,7 @@ export function DialogSessionList() {
       return {
         title: deleting
           ? `Press ${shortcuts.get("session.delete")} again to confirm`
-          : withTimestampedFallback(session),
+          : parseSessionTitle(withTimestampedFallback(session)).displayTitle,
         value: session.id,
         category,
         footer,
@@ -181,11 +182,21 @@ export function DialogSessionList() {
       }
     }
 
+    // Grouped sessions come first, alphabetically by group and most recent first within one; the rest
+    // keep the server's order under their date.
     const remaining = sessions()
       .filter((session) => !session.parentID && !pinnedSet.has(session.id))
-      .map((session) => {
-        const date = new Date(session.time.updated).toDateString()
-        return option(session, date === today ? "Today" : date)
+      .map((session) => ({ session, group: parseSessionTitle(withTimestampedFallback(session)).group }))
+      .toSorted((a, b) => {
+        if (a.group && b.group) return a.group.localeCompare(b.group) || b.session.time.updated - a.session.time.updated
+        if (a.group) return -1
+        if (b.group) return 1
+        return 0
+      })
+      .map((entry) => {
+        if (entry.group) return option(entry.session, `${entry.group}:`)
+        const date = new Date(entry.session.time.updated).toDateString()
+        return option(entry.session, date === today ? "Today" : date)
       })
 
     return [...pinned.map((sessionID) => option(sessionMap.get(sessionID)!, "Pinned")), ...remaining]
@@ -281,8 +292,11 @@ export function DialogSessionList() {
         {
           command: "session.rename",
           title: "rename",
-          onTrigger: (option: { value: string; title: string }) =>
-            DialogSessionRename.show(dialog, option.value, option.title),
+          // The list shows a grouped title without its group, so renaming starts from the stored title.
+          onTrigger: (option: { value: string; title: string }) => {
+            const session = sessions().find((item) => item.id === option.value)
+            DialogSessionRename.show(dialog, option.value, session ? withTimestampedFallback(session) : option.title)
+          },
         },
       ]}
       footerHints={[
