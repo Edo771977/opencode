@@ -32,11 +32,11 @@ The last matching rule wins, so the specific exceptions follow the broad rule.
 
 Each rule requires three string fields:
 
-| Field      | Meaning                                                                    |
-| ---------- | -------------------------------------------------------------------------- |
-| `action`   | Tool permission action                                                     |
+| Field      | Meaning                                                                      |
+| ---------- | ---------------------------------------------------------------------------- |
+| `action`   | Tool permission action                                                       |
 | `resource` | Value being used, such as a path, command, URL, query, skill ID, or agent ID |
-| `effect`   | `allow`, `deny`, or `ask`                                                   |
+| `effect`   | `allow`, `deny`, or `ask`                                                    |
 
 ```jsonc
 {
@@ -59,17 +59,15 @@ If no rule matches, OpenCode uses `ask`.
 
 Actions and resources use simple whole-value wildcards:
 
-| Pattern | Match                                      |
-| ------- | ------------------------------------------ |
-| `*`     | Zero or more characters, including `/`    |
-| `?`     | Exactly one character                     |
-| Other   | The literal character                     |
+| Pattern | Match                                  |
+| ------- | -------------------------------------- |
+| `*`     | Zero or more characters, including `/` |
+| `?`     | Exactly one character                  |
+| Other   | The literal character                  |
 
 ```jsonc
 {
-  "permissions": [
-    { "action": "edit", "resource": "packages/docs/*.mdx", "effect": "allow" },
-  ],
+  "permissions": [{ "action": "edit", "resource": "packages/docs/*.mdx", "effect": "allow" }],
 }
 ```
 
@@ -106,21 +104,21 @@ operation is allowed.
 V2 action names are strings, so plugins may define more actions. Built-in tools
 currently use these actions and resources:
 
-| Action               | Resource                                                                    |
-| -------------------- | --------------------------------------------------------------------------- |
-| `read`               | Location-relative internal path or canonical absolute external path         |
-| `edit`               | Target path for `edit`, `write`, and `patch`                                |
-| `glob`               | Requested glob pattern                                                      |
-| `grep`               | Requested regular expression, not the search path                           |
-| `shell`              | Scanner-produced command string; compound commands may produce several      |
-| `subagent`           | Target agent ID                                                             |
-| `budget`             | Agent ID; only rules naming `budget` apply, see [Budget](/agents#budget) |
-| `skill`              | Skill ID                                                                    |
-| `question`           | `*`                                                                         |
-| `webfetch`           | Requested URL                                                               |
-| `websearch`          | Search query                                                                |
-| `external_directory` | Canonical external directory boundary, normally ending in `/*`              |
-| `<server>_<tool>`    | `*` for an MCP tool; unsupported characters in both names become `_`        |
+| Action               | Resource                                                                     |
+| -------------------- | ---------------------------------------------------------------------------- |
+| `read`               | Location-relative internal path or canonical absolute external path          |
+| `edit`               | Target path for `edit`, `write`, and `patch`                                 |
+| `glob`               | Requested glob pattern                                                       |
+| `grep`               | Requested regular expression, not the search path                            |
+| `shell`              | Scanner-produced command string; compound commands may produce several       |
+| `subagent`           | Target agent ID                                                              |
+| `budget`             | Agent ID; only rules naming `budget` apply, see [Budget](/agents#budget)     |
+| `skill`              | Skill ID                                                                     |
+| `question`           | `*`                                                                          |
+| `webfetch`           | Requested URL                                                                |
+| `websearch`          | Search query                                                                 |
+| `external_directory` | Canonical external directory boundary, normally ending in `/*`               |
+| `<server>_<tool>`    | `*` for an MCP tool; unsupported characters in both names become `_`         |
 | `execute`            | `*`; controls Code Mode availability, while nested tools enforce their rules |
 
 For example, allow one skill and deny all other skills:
@@ -211,15 +209,15 @@ Every agent, including custom agents, starts with this ordered base policy:
 
 Shipped agents append these policies:
 
-| Agent        | Additional policy                                                              |
-| ------------ | ------------------------------------------------------------------------------ |
-| `build`      | Allows questions                                                               |
-| `plan`       | Allows questions; denies edits except files under `~/.opencode/plan`           |
-| `general`    | Denies questions and launching subagents                                       |
+| Agent        | Additional policy                                                                                                          |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `build`      | Allows questions                                                                                                           |
+| `plan`       | Allows questions; denies edits except files under `~/.opencode/plan`                                                       |
+| `general`    | Denies questions and launching subagents                                                                                   |
 | `explore`    | Denies everything except reads, globs, grep, web fetches, and web searches; asks for external directories and `.env` reads |
-| `title`      | Denies all actions                                                              |
-| `summary`    | Denies all actions                                                              |
-| `compaction` | Keeps the base policy                                                          |
+| `title`      | Denies all actions                                                                                                         |
+| `summary`    | Denies all actions                                                                                                         |
+| `compaction` | Keeps the base policy                                                                                                      |
 
 OpenCode also allows external-directory access to its managed tool-output,
 shell-output, temporary, and global configuration directories. The underlying
@@ -242,9 +240,7 @@ Put shared rules at the top level and narrower rules under
     "reviewer": {
       "description": "Review code without changing it",
       "mode": "subagent",
-      "permissions": [
-        { "action": "edit", "resource": "*", "effect": "deny" },
-      ],
+      "permissions": [{ "action": "edit", "resource": "*", "effect": "deny" }],
     },
   },
 }
@@ -258,11 +254,11 @@ permissions.
 
 When a rule resolves to `ask`, clients can reply with:
 
-| Choice       | Reply      | Result                                                               |
-| ------------ | ---------- | -------------------------------------------------------------------- |
-| Allow once   | `once`     | Approve only the pending request                                     |
-| Allow always | `always`   | Approve it and save the tool's proposed patterns for the project     |
-| Reject       | `reject`   | Reject it and every other pending permission request in that session |
+| Choice       | Reply    | Result                                                               |
+| ------------ | -------- | -------------------------------------------------------------------- |
+| Allow once   | `once`   | Approve only the pending request                                     |
+| Allow always | `always` | Approve it and save the tool's proposed patterns for the project     |
+| Reject       | `reject` | Reject it and every other pending permission request in that session |
 
 For example, choosing **Allow always** for `git status --short` may save a
 shell prefix that covers later `git status` commands:

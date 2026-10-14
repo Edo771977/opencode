@@ -71,9 +71,7 @@ Define agents under `agents` in any [OpenCode configuration file](/config):
       "description": "Reviews current changes",
       "mode": "subagent",
       "system": "Report findings in severity order.",
-      "permissions": [
-        { "action": "edit", "resource": "*", "effect": "deny" },
-      ],
+      "permissions": [{ "action": "edit", "resource": "*", "effect": "deny" }],
     },
   },
 }
@@ -107,11 +105,11 @@ Set `mode` according to where the agent should run:
 }
 ```
 
-| Mode | Behavior |
-| --- | --- |
-| `primary` | Runs as the main agent for a session. This is the default for a new custom agent. |
-| `subagent` | Runs only in a child session through the `subagent` tool. |
-| `all` | Runs either as a primary agent or a subagent. |
+| Mode       | Behavior                                                                          |
+| ---------- | --------------------------------------------------------------------------------- |
+| `primary`  | Runs as the main agent for a session. This is the default for a new custom agent. |
+| `subagent` | Runs only in a child session through the `subagent` tool.                         |
+| `all`      | Runs either as a primary agent or a subagent.                                     |
 
 Subagents run with fresh context in foreground or background child sessions. The parent agent's `subagent` permissions control which agents it may launch; the child uses its own configured permissions.
 
@@ -132,12 +130,12 @@ Subagents run with fresh context in foreground or background child sessions. The
 
 OpenCode includes these visible agents:
 
-| Agent | Mode | Purpose |
-| --- | --- | --- |
-| **Build** (`build`) | `primary` | Default coding agent. Tools are allowed by default; sensitive environment-file reads and access outside the workspace ask for approval. |
-| **Plan** (`plan`) | `primary` | Explores and plans without editing normal project files. It may write OpenCode plan files when asked, and shell commands remain permission-controlled. |
-| **General** (`general`) | `subagent` | Handles research and multi-step work with broad tool access, but cannot launch more subagents. |
-| **Explore** (`explore`) | `subagent` | Searches and reads code or web sources without editing files. |
+| Agent                   | Mode       | Purpose                                                                                                                                                |
+| ----------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Build** (`build`)     | `primary`  | Default coding agent. Tools are allowed by default; sensitive environment-file reads and access outside the workspace ask for approval.                |
+| **Plan** (`plan`)       | `primary`  | Explores and plans without editing normal project files. It may write OpenCode plan files when asked, and shell commands remain permission-controlled. |
+| **General** (`general`) | `subagent` | Handles research and multi-step work with broad tool access, but cannot launch more subagents.                                                         |
+| **Explore** (`explore`) | `subagent` | Searches and reads code or web sources without editing files.                                                                                          |
 
 Override a built-in by using the same ID:
 
@@ -145,9 +143,7 @@ Override a built-in by using the same ID:
 {
   "agents": {
     "build": {
-      "permissions": [
-        { "action": "shell", "resource": "git push *", "effect": "ask" },
-      ],
+      "permissions": [{ "action": "shell", "resource": "git push *", "effect": "ask" }],
     },
   },
 }
@@ -161,14 +157,10 @@ Agent definitions merge in configuration order. Later scalar values replace earl
 
 ```jsonc
 {
-  "permissions": [
-    { "action": "shell", "resource": "*", "effect": "ask" },
-  ],
+  "permissions": [{ "action": "shell", "resource": "*", "effect": "ask" }],
   "agents": {
     "build": {
-      "permissions": [
-        { "action": "shell", "resource": "git status", "effect": "allow" },
-      ],
+      "permissions": [{ "action": "shell", "resource": "git status", "effect": "allow" }],
     },
   },
 }
@@ -252,22 +244,22 @@ Project instructions, skills, references, and other instruction sources are stil
 }
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `action` | Tool or permission action. Wildcards are supported. |
+| Field      | Meaning                                                                                 |
+| ---------- | --------------------------------------------------------------------------------------- |
+| `action`   | Tool or permission action. Wildcards are supported.                                     |
 | `resource` | Path, command, agent ID, or other value matched by the action. Wildcards are supported. |
-| `effect` | `allow`, `ask`, or `deny`. |
+| `effect`   | `allow`, `ask`, or `deny`.                                                              |
 
 The last matching rule wins, so put broad rules before exceptions. Common actions include:
 
-| Action | Covers |
-| --- | --- |
-| `shell` | Shell commands |
-| `edit` | Edit, write, and patch tools |
-| `subagent` | Child agents |
-| `read`, `glob`, `grep` | Local discovery tools |
-| `webfetch`, `websearch` | Web tools |
-| `skill` | Skill loading |
+| Action                  | Covers                       |
+| ----------------------- | ---------------------------- |
+| `shell`                 | Shell commands               |
+| `edit`                  | Edit, write, and patch tools |
+| `subagent`              | Child agents                 |
+| `read`, `glob`, `grep`  | Local discovery tools        |
+| `webfetch`, `websearch` | Web tools                    |
+| `skill`                 | Skill loading                |
 
 For `read`, `edit`, and `external_directory` resources, OpenCode expands `~` and `$HOME`:
 
@@ -412,4 +404,3 @@ A subagent that finishes with a background shell or a background subagent of its
 `subagent_parallel` runs two to five independent subtasks at once, each in its own subagent session, and reports every outcome: completed, running if it was moved to the background, or error with its failure and session. Each subtask takes the same `agent`, `description`, `prompt`, `model` and `output` as `subagent`.
 
 Every subtask is checked, and its `subagent` permission asked one at a time, before any starts, so a bad entry never leaves sessions behind for its siblings. A rule that hides `subagent` hides `subagent_parallel` as well, and `experimental.subagent_depth` keeps subagents from fanning out by default.
-
