@@ -193,7 +193,8 @@ const table = sqliteTable("session", {
 ## Configuration Compatibility
 
 - A setting written wrongly costs its own key, not the file. Both shapes are read as a whole first and group by group when that fails.
-- Drop together the keys the migration folds into one setting. `tools` and `permission` become one ruleset, and keeping the half that allows while dropping the half that denies leaves a file more permissive than it reads; `share`/`autoshare` and `references`/`reference` are fallbacks with the same hazard.
+- A permission rule that cannot be read is a deny over whatever it names, in its own place; never drop it. Dropped, it leaves the decision to the allowances around it, which a mistyped denial was written to qualify; dropping the whole ruleset hands it to the defaults and loses the denials that did read. The same holds for a policy on an action this client enforces; an unknown policy action is skipped, so an older client still reads a newer policy file.
+- A setting written wrongly never lets the legacy value it overrides through. `share`/`autoshare`, `references`/`reference` and every same-name legacy entry fold into one setting, and falling back to the legacy half applies what the file no longer says.
 - Judge a key both config shapes spell the same by the shape it positively has, never by "not the other one": values both shapes accept exist, and so do values neither fully describes.
 - Say which file was ignored and why. A config that vanishes in silence is how three of these bugs stayed invisible.
 

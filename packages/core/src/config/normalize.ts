@@ -180,23 +180,12 @@ export function normalize(input: unknown): Result {
     input.providers,
   )
 
-  // `tools`, `permission` and `permissions` become one ruleset, so a rule that cannot be read costs
-  // all of them. Keeping the rest would keep an allowance while dropping the denial written to
-  // qualify it — `tools: { bash: true }` beside a mistyped `permission.bash["rm *"]` — and leave the
-  // file more permissive than it reads.
-  const unread = diagnostics.length
-  const toolRules = migrateTools(input.tools, diagnostics)
-  const permissionRules = migratePermissions(input.permission, diagnostics)
-  const nativePermissions = decodeList(input.permissions, Permission.Rule, ["permissions"], diagnostics, decodeEncoded)
-  const permissions = [...toolRules, ...permissionRules, ...nativePermissions]
-  const unreadable = diagnostics.slice(unread).some((diagnostic) => diagnostic.kind === "invalid")
-  if (unreadable && permissions.length)
-    diagnostics.push({
-      kind: "invalid",
-      path: ["permissions"],
-      message: "dropped every permission rule because one of them is malformed",
-    })
-  if (!unreadable && (permissions.length || Array.isArray(input.permissions))) encoded.permissions = permissions
+  const permissions = [
+    ...migrateTools(input.tools, diagnostics),
+    ...migratePermissions(input.permission, diagnostics),
+    ...nativePermissions(input.permissions, diagnostics),
+  ]
+  if (permissions.length || Array.isArray(input.permissions)) encoded.permissions = permissions
 
   const legacyPlugins = decodeList(input.plugin, ConfigPluginV1.Spec, ["plugin"], diagnostics, decodeValue).map(
     (plugin) => (typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] }),
@@ -467,15 +456,7 @@ function normalizeExperimental(
         )
         if (value !== undefined) result.subagent_depth = value
       }
-      native.push(
-        ...decodeList(
-          experimental.policies,
-          ConfigPolicy.Info,
-          ["experimental", "policies"],
-          diagnostics,
-          decodeEncoded,
-        ),
-      )
+      native.push(...policies(experimental.policies, diagnostics))
     }
   }
   if (generated.length || native.length || (isRecord(input.experimental) && Array.isArray(input.experimental.policies)))
@@ -521,45 +502,106 @@ function normalizeLsp(input: Record<string, unknown>, encoded: Record<string, un
   if (isRecord(input.lsp) && (!Object.keys(input.lsp).length || Object.keys(entries).length)) encoded.lsp = entries
 }
 
+// A permission rule or policy that cannot be read becomes a deny over whatever it names, in its own
+// place. Dropping it would leave the decision to the rules around it, which are more permissive than
+// a denial the file may have meant, and dropping the whole ruleset would hand it to the defaults.
+// Rules match last, so a later allowance still overrides the deny as it would have overridden the
+// rule as written.
 function migrateTools(value: unknown, diagnostics: Diagnostic[]) {
   if (value === undefined) return []
-  if (!isRecord(value)) {
-    invalid(["tools"], diagnostics)
-    return []
-  }
-  return Object.entries(value).flatMap(([action, raw]) => {
-    const enabled = decodeValue(Schema.Boolean, raw, ["tools", action], diagnostics)
-    if (enabled === undefined) return []
-    return [{ action: ConfigMigrateV1.normalizeAction(action), resource: "*", effect: enabled ? "allow" : "deny" }]
+  if (!isRecord(value)) return unreadableRuleset(value, ["tools"], diagnostics)
+  return Object.entries(value).map(([key, raw]) => {
+    const action = ConfigMigrateV1.normalizeAction(key)
+    if (typeof raw !== "boolean") return denyUnreadable(action, "*", ["tools", key], diagnostics)
+    return { action, resource: "*", effect: raw ? "allow" : "deny" }
   })
 }
 
 function migratePermissions(value: unknown, diagnostics: Diagnostic[]) {
   if (value === undefined) return []
   if (typeof value === "string") {
-    const effect = decodeValue(ConfigPermissionV1.Action, value, ["permission"], diagnostics)
-    return effect === undefined ? [] : [{ action: "*", resource: "*", effect }]
+    const effect = permissionEffect(value)
+    return [
+      effect === undefined
+        ? denyUnreadable("*", "*", ["permission"], diagnostics)
+        : { action: "*", resource: "*", effect },
+    ]
   }
-  if (!isRecord(value)) {
-    invalid(["permission"], diagnostics)
-    return []
-  }
-  return Object.entries(value).flatMap(([action, raw]) => {
+  if (!isRecord(value)) return unreadableRuleset(value, ["permission"], diagnostics)
+  return Object.entries(value).flatMap(([key, raw]) => {
+    const action = ConfigMigrateV1.normalizeAction(key)
     if (typeof raw === "string") {
-      const effect = decodeValue(ConfigPermissionV1.Action, raw, ["permission", action], diagnostics)
-      return effect === undefined ? [] : [{ action: ConfigMigrateV1.normalizeAction(action), resource: "*", effect }]
+      const effect = permissionEffect(raw)
+      return [
+        effect === undefined
+          ? denyUnreadable(action, "*", ["permission", key], diagnostics)
+          : { action, resource: "*", effect },
+      ]
     }
-    if (!isRecord(raw)) {
-      invalid(["permission", action], diagnostics)
-      return []
-    }
-    return Object.entries(raw).flatMap(([resource, effect], index) => {
-      const decoded = decodeValue(ConfigPermissionV1.Action, effect, ["permission", action, String(index)], diagnostics)
-      return decoded === undefined
-        ? []
-        : [{ action: ConfigMigrateV1.normalizeAction(action), resource, effect: decoded }]
+    if (!isRecord(raw)) return [denyUnreadable(action, "*", ["permission", key], diagnostics)]
+    // The diagnostic names the rule by position: a resource key can hold a secret.
+    return Object.entries(raw).map(([resource, rawEffect], index) => {
+      const effect = permissionEffect(rawEffect)
+      return effect === undefined
+        ? denyUnreadable(action, resource, ["permission", key, String(index)], diagnostics)
+        : { action, resource, effect }
     })
   })
+}
+
+function nativePermissions(value: unknown, diagnostics: Diagnostic[]) {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return unreadableRuleset(value, ["permissions"], diagnostics)
+  return value.map(
+    (item, index) =>
+      decodeQuietly(Permission.Rule, item) ??
+      denyUnreadable(named(item, "action"), named(item, "resource"), ["permissions", String(index)], diagnostics),
+  )
+}
+
+// Unknown actions are skipped, so that this client still reads a policy file written for a newer one.
+// A known action is one this client enforces, and a policy for it that cannot be read is denied.
+function policies(value: unknown, diagnostics: Diagnostic[]) {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    invalid(["experimental", "policies"], diagnostics)
+    return []
+  }
+  const known = Schema.is(ConfigPolicy.Info.fields.action)
+  return value.flatMap((item, index) => {
+    const path = ["experimental", "policies", String(index)]
+    const policy = decodeQuietly(ConfigPolicy.Info, item)
+    if (policy !== undefined) return [policy]
+    const action = isRecord(item) ? item.action : undefined
+    if (!known(action)) {
+      invalid(path, diagnostics)
+      return []
+    }
+    return [denyUnreadable(action, named(item, "resource"), path, diagnostics)]
+  })
+}
+
+function permissionEffect(value: unknown) {
+  return Option.getOrUndefined(Schema.decodeUnknownOption(ConfigPermissionV1.Action, options)(value))
+}
+
+function named(item: unknown, key: string) {
+  return isRecord(item) && typeof item[key] === "string" ? item[key] : "*"
+}
+
+function denyUnreadable(action: string, resource: string, path: string[], diagnostics: Diagnostic[]) {
+  diagnostics.push({ kind: "invalid", path, message: "denied what a malformed rule covers" })
+  return { action, resource, effect: "deny" as const }
+}
+
+// A root of the wrong kind says nothing about which rules it meant, so it denies everything, unless it
+// is empty: an empty container hides no rule.
+function unreadableRuleset(value: unknown, path: string[], diagnostics: Diagnostic[]) {
+  if ((isRecord(value) || Array.isArray(value)) && !Object.keys(value).length) {
+    invalid(path, diagnostics)
+    return []
+  }
+  return [denyUnreadable("*", "*", path, diagnostics)]
 }
 
 function migrateProviders(value: unknown, diagnostics: Diagnostic[]) {
@@ -727,15 +769,21 @@ function decodeEncoded<S extends Schema.Codec<unknown, unknown, never, never>>(
   path: string[],
   diagnostics: Diagnostic[],
 ) {
-  const decoded = Schema.decodeUnknownOption(schema, options)(value)
-  if (Option.isNone(decoded)) {
-    invalid(path, diagnostics)
-    return undefined
-  }
-  const encoded = Schema.encodeUnknownOption(schema, options)(decoded.value)
-  if (Option.isSome(encoded)) return plain(encoded.value)
-  invalid(path, diagnostics)
-  return undefined
+  const encoded = decodeQuietly(schema, value)
+  if (encoded === undefined) invalid(path, diagnostics)
+  return encoded
+}
+
+function decodeQuietly<S extends Schema.Codec<unknown, unknown, never, never>>(schema: S, value: unknown) {
+  return Option.getOrUndefined(
+    Schema.decodeUnknownOption(
+      schema,
+      options,
+    )(value).pipe(
+      Option.flatMap((decoded) => Schema.encodeUnknownOption(schema, options)(decoded)),
+      Option.map(plain),
+    ),
+  )
 }
 
 function canonical<S extends Schema.Codec<unknown, unknown, never, never>>(schema: S, value: unknown) {

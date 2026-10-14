@@ -1602,14 +1602,18 @@ describe("Config", () => {
           }).pipe(Effect.provide(testLayer(tmp.path)))
 
           expect(documents[0]?.info.model).toMatchObject({ providerID: "anthropic", model: "claude" })
-          expect(documents[0]?.info.permissions).toBeUndefined()
+          // The denial that could not be read is a deny in its place, after the allowance it qualifies.
+          expect(documents[0]?.info.permissions).toEqual([
+            { action: "shell", resource: "*", effect: "allow" },
+            { action: "shell", resource: "rm *", effect: "deny" },
+          ])
           expect(documents[0]?.info.share).toBeUndefined()
           // And the file says so: which file, which setting, and that the rest of it was dropped too.
           expect(
             output
-              .filter((item) => item.source === file && String(item.action).startsWith("dropped"))
+              .filter((item) => item.source === file && /^(dropped|denied)/.test(String(item.action)))
               .map((item) => item.path),
-          ).toEqual(["$.permissions", "$.share"])
+          ).toEqual(["$.permission.bash.0", "$.share"])
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ).pipe(Effect.provide(Logger.layer([logger])))

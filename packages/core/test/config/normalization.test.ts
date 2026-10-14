@@ -325,15 +325,15 @@ describe("ConfigNormalize", () => {
       {
         kind: "invalid",
         path: ["permission", "bash", "0"],
-        message: "skipped malformed recognized value",
+        message: "denied what a malformed rule covers",
       },
     ])
     expect(JSON.stringify(result.diagnostics)).not.toContain("TOPSECRET")
   })
 
-  // Permissions are the exception to per-item recovery in this fork: see "drops every rule of a ruleset
-  // that holds a malformed one".
-  test("recovers list items for skills and instructions, and drops a ruleset holding a malformed rule", () => {
+  // Permissions recover differently in this fork: a malformed rule becomes a deny in its place, see
+  // "denies what a malformed permission rule covers, in its place".
+  test("recovers list items for skills, instructions, and permissions", () => {
     const result = normalized({
       skills: { paths: ["./skills", 1], urls: [false, "https://example.com/skills"] },
       instructions: ["one", 2, "three"],
@@ -344,8 +344,11 @@ describe("ConfigNormalize", () => {
     })
     expect(result.encoded.skills).toEqual(["./skills", "https://example.com/skills"])
     expect(result.encoded.instructions).toEqual(["one", "three"])
-    expect(result.encoded.permissions).toBeUndefined()
-    expect(result.diagnostics.filter((item) => item.kind === "invalid")).toHaveLength(5)
+    expect(result.encoded.permissions).toEqual([
+      { action: "read", resource: "*", effect: "allow" },
+      { action: "read", resource: "*", effect: "deny" },
+    ])
+    expect(result.diagnostics.filter((item) => item.kind === "invalid")).toHaveLength(4)
   })
 
   test("omits malformed collection roots instead of synthesizing empty values", () => {
@@ -725,20 +728,76 @@ describe("ConfigNormalize", () => {
     const dropped = (result: ReturnType<typeof normalized>) =>
       result.diagnostics.filter((item) => item.message.startsWith("dropped")).map((item) => item.path)
 
-    test("drops every rule of a ruleset that holds a malformed one", () => {
-      // `denied` is a typo for `deny`. Keeping the allowance without the denial written to qualify
-      // it leaves the file more permissive than it reads.
-      const result = normalized({ tools: { bash: true }, permission: { bash: { "rm *": "denied" } } })
-      expect(result.encoded.permissions).toBeUndefined()
-      expect(dropped(result)).toEqual([["permissions"]])
+    // Fail closed: a rule that cannot be read is a deny over whatever it names. Dropped, it would
+    // leave the decision to the allowance around it — `denied` below is a typo for `deny` — and
+    // dropping the whole ruleset would hand it to the defaults and lose the denials that did read.
+    test("denies what a malformed permission rule covers, in its place", () => {
+      const result = normalized({
+        tools: { bash: true, edit: "yes" },
+        permission: { bash: { "rm *": "denied", "git *": "allow" }, webfetch: "sometimes", read: 5 },
+        permissions: [
+          { action: "shell", resource: "git push *", effect: "nope" },
+          { resource: "secrets/*", effect: "allow?" },
+        ],
+      })
+      expect(result.encoded.permissions).toEqual([
+        { action: "shell", resource: "*", effect: "allow" },
+        { action: "edit", resource: "*", effect: "deny" },
+        { action: "shell", resource: "rm *", effect: "deny" },
+        { action: "shell", resource: "git *", effect: "allow" },
+        { action: "webfetch", resource: "*", effect: "deny" },
+        { action: "read", resource: "*", effect: "deny" },
+        { action: "shell", resource: "git push *", effect: "deny" },
+        // No action to name, so it covers every action on the resource it does name.
+        { action: "*", resource: "secrets/*", effect: "deny" },
+      ])
+      expect(result.diagnostics.map((item) => item.path)).toEqual([
+        ["tools", "edit"],
+        ["permission", "bash", "0"],
+        ["permission", "webfetch"],
+        ["permission", "read"],
+        ["permissions", "0"],
+        ["permissions", "1"],
+      ])
+    })
+
+    test("denies everything for a ruleset root it cannot read, unless the root is empty", () => {
+      const deny = [{ action: "*", resource: "*", effect: "deny" }]
+      expect(normalized({ permission: "allowed" }).encoded.permissions).toEqual(deny)
+      expect(normalized({ permission: ["allow"] }).encoded.permissions).toEqual(deny)
+      expect(normalized({ tools: "all" }).encoded.permissions).toEqual(deny)
+      expect(normalized({ permissions: { shell: "allow" } }).encoded.permissions).toEqual(deny)
+      // A later allowance still overrides it, as it would have overridden the rule as written.
       expect(
-        normalized({
-          permissions: [
-            { action: "shell", resource: "*", effect: "allow" },
-            { action: "shell", resource: "rm *", effect: "denied" },
+        normalized({ permission: "allowed", permissions: [{ action: "read", resource: "*", effect: "allow" }] }).encoded
+          .permissions,
+      ).toEqual([...deny, { action: "read", resource: "*", effect: "allow" }])
+      // An empty container hides no rule.
+      expect(normalized({ permissions: {} }).encoded.permissions).toBeUndefined()
+      expect(normalized({ tools: [] }).encoded.permissions).toBeUndefined()
+    })
+
+    test("denies a malformed policy for an action this client enforces, and skips an unknown one", () => {
+      const result = normalized({
+        experimental: {
+          policies: [
+            { action: "tool.use", effect: "allow", resource: "shell:*" },
+            { action: "tool.use", effect: "denied", resource: "shell:rm *" },
+            { action: "provider.use", effect: "deny" },
+            { action: "future.use", effect: "deny", resource: "*" },
           ],
-        }).encoded.permissions,
-      ).toBeUndefined()
+        },
+      })
+      expect(Schema.decodeUnknownSync(Info)(result.encoded).experimental?.policies).toEqual([
+        { action: "tool.use", effect: "allow", resource: "shell:*" },
+        { action: "tool.use", effect: "deny", resource: "shell:rm *" },
+        { action: "provider.use", effect: "deny", resource: "*" },
+      ])
+      expect(result.diagnostics.map((item) => [item.path.join("."), item.message])).toEqual([
+        ["experimental.policies.1", "denied what a malformed rule covers"],
+        ["experimental.policies.2", "denied what a malformed rule covers"],
+        ["experimental.policies.3", "skipped malformed recognized value"],
+      ])
     })
 
     test("keeps a ruleset whose rules all read", () => {
