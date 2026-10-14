@@ -13,6 +13,7 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentJob } from "../../session/subagent-job.js"
+import { SubagentOutput } from "../../session/subagent-output.js"
 
 export const name = "subagent"
 
@@ -44,6 +45,10 @@ export const Input = Schema.Struct({
   background: Schema.optionalKey(Schema.Boolean).annotate({
     description:
       "Run the subagent in the background and return immediately. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress.",
+  }),
+  output: Schema.optionalKey(Schema.Array(SubagentOutput.Field)).annotate({
+    description:
+      "Fields you need back from the subagent. Set this when you will act on the answer rather than read it: the subagent is told to end with a JSON object carrying exactly these fields, and the call fails if it does not, instead of handing you prose to guess at.",
   }),
 })
 
@@ -205,10 +210,11 @@ export const Plugin = {
               yield* sessions
                 .prompt({
                   sessionID: child.id,
-                  text:
-                    existing === undefined
-                      ? ["You are a subagent spawned by another session.", input.prompt].join("\n")
-                      : input.prompt,
+                  text: [
+                    ...(existing === undefined ? ["You are a subagent spawned by another session."] : []),
+                    input.prompt,
+                    ...(input.output?.length ? ["", SubagentOutput.instruction(input.output)] : []),
+                  ].join("\n"),
                   ...(background && existing === undefined ? { resume: false } : {}),
                 })
                 .pipe(
@@ -223,6 +229,7 @@ export const Plugin = {
                 childSessionID: child.id,
                 agent: agent.name,
                 description: input.description,
+                ...(input.output?.length ? { output: input.output } : {}),
               }
               yield* subagents.start(recovery)
 
@@ -249,10 +256,16 @@ export const Plugin = {
                 })
               if (result?.info.status === "cancelled")
                 return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child.id})` })
+              const checked = SubagentCompletion.declared(
+                result?.info.output ?? SubagentCompletion.NO_TEXT,
+                input.output,
+                child.id,
+              )
+              if (!checked.ok) return yield* new ToolFailure({ message: checked.message })
               return {
                 sessionID: child.id,
                 status: "completed" as const,
-                output: result?.info.output ?? SubagentCompletion.NO_TEXT,
+                output: checked.text,
               }
             }).pipe(
               Effect.map((output) => ({

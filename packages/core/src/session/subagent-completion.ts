@@ -5,6 +5,7 @@ import type { Job } from "../job.js"
 import type { Session } from "../session.js"
 import type { SessionMessage } from "./message.js"
 import type { SessionSchema } from "./schema.js"
+import { SubagentOutput } from "./subagent-output.js"
 
 export const NO_TEXT = "Subagent completed without a text response."
 
@@ -45,7 +46,7 @@ export function withLeftRunning(text: string, sessionID: SessionSchema.ID, runni
   return [
     text,
     "",
-    `This subagent finished its answer but left work running in its own session (sessionID: ${sessionID}):`,
+    `${LEFT_RUNNING} (sessionID: ${sessionID}):`,
     ...running.map((job) =>
       job.recovery.kind === "shell"
         ? `- shell: ${job.recovery.command}`
@@ -53,6 +54,26 @@ export function withLeftRunning(text: string, sessionID: SessionSchema.ID, runni
     ),
     "That work reports to the subagent's session, not to you. Do not treat the answer above as the whole result: continue the subagent with its sessionID to collect what is still running, or account for it in what you do next.",
   ].join("\n")
+}
+
+const LEFT_RUNNING = "This subagent finished its answer but left work running in its own session"
+
+/**
+ * Checks an answer against the fields its caller declared. Only the subagent's own answer is parsed;
+ * what it left running is reported after the fields, never mistaken for them.
+ */
+export function declared(
+  output: string,
+  fields: readonly SubagentOutput.Field[] | undefined,
+  sessionID: SessionSchema.ID,
+): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly message: string } {
+  if (!fields?.length) return { ok: true, text: output }
+  const split = output.lastIndexOf(`\n\n${LEFT_RUNNING}`)
+  const answer = split < 0 ? output : output.slice(0, split)
+  const note = split < 0 ? undefined : output.slice(split + 2)
+  const parsed = SubagentOutput.parse(answer, fields)
+  if (!parsed.ok) return { ok: false, message: SubagentOutput.failure(sessionID, parsed.error, answer) }
+  return { ok: true, text: [JSON.stringify(parsed.value, null, 2), ...(note ? [note] : [])].join("\n\n") }
 }
 
 export const deliver = Effect.fnUntraced(function* (
@@ -65,19 +86,25 @@ export const deliver = Effect.fnUntraced(function* (
 ) {
   if (input.status === "running") return
   const recovery = input.recovery
-  const text =
+  const checked =
     input.status === "completed"
-      ? (input.output ?? NO_TEXT)
-      : input.status === "error"
-        ? (input.error ?? "Subagent failed")
-        : "Subagent cancelled"
+      ? declared(input.output ?? NO_TEXT, recovery.output, recovery.childSessionID)
+      : undefined
+  const state = checked?.ok === false ? "error" : input.status
+  const text = checked
+    ? checked.ok
+      ? checked.text
+      : checked.message
+    : input.status === "error"
+      ? (input.error ?? "Subagent failed")
+      : "Subagent cancelled"
   yield* sessions.synthetic({
     ...(input.notificationID ? { id: input.notificationID } : {}),
     sessionID: recovery.parentSessionID,
     ...(input.resume === false ? { resume: false } : {}),
     description: recovery.description,
-    text: `<subagent sessionID="${recovery.childSessionID}" state="${input.status}" description="${recovery.description}">\n${text}\n</subagent>`,
-    metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state: input.status },
+    text: `<subagent sessionID="${recovery.childSessionID}" state="${state}" description="${recovery.description}">\n${text}\n</subagent>`,
+    metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state },
   })
   if (input.notificationID) yield* jobs.completeBackground(input.notificationID)
 })

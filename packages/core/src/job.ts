@@ -5,6 +5,7 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { KV } from "./kv.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
+import { SubagentOutput } from "./session/subagent-output.js"
 
 const Background = Schema.Struct({
   id: Schema.String,
@@ -22,6 +23,8 @@ const Background = Schema.Struct({
       childSessionID: SessionSchema.ID,
       agent: Schema.String,
       description: Schema.String,
+      // Fields the caller declared it needs back, checked when the answer is delivered.
+      output: Schema.optionalKey(Schema.Array(SubagentOutput.Field)),
     }),
   ]),
   status: Schema.Literals(["running", "completed", "error", "cancelled"]),

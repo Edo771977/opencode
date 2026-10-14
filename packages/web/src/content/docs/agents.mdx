@@ -719,6 +719,30 @@ Users can always invoke any subagent directly via the `@` autocomplete menu, eve
 
 ---
 
+### Subagent results
+
+A subagent answers in prose, and the caller receives its last text. That reads well and is hard to act on, so a caller that will use the answer rather than relay it can declare the fields it needs back. The subagent is then told to end with one JSON object carrying exactly those fields, and the call fails if it does not produce them, so the caller never has to parse prose or guess at a missing value.
+
+This is set by the calling model on the `subagent` tool, not in your config:
+
+```json
+{
+  "agent": "general",
+  "description": "audit dependencies",
+  "prompt": "Check every direct dependency for a known advisory.",
+  "output": [
+    { "name": "summary", "description": "What was found", "type": "string" },
+    { "name": "advisories", "description": "One entry per affected package", "type": "array" }
+  ]
+}
+```
+
+A field may declare a `type` (`string`, `number`, `boolean`, `array` or `object`) or leave it out to accept any value. When a subagent ignores the shape, the call fails with what was missing and an excerpt of what it did answer, and its session stays available through the `sessionID` in the message, so the caller can say what was wrong instead of starting over. A background subagent's answer is checked the same way when it is delivered.
+
+A subagent that finishes with work still running in the background, a shell it started or a subagent of its own, says so after its answer. That work reports to the subagent's session, not to the caller, so the caller is told where to collect it.
+
+---
+
 ### Color
 
 Customize the agent's visual appearance in the UI with the `color` option. This affects how the agent appears in the interface.

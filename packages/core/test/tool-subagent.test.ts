@@ -150,28 +150,33 @@ const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
 const it = testEffect(
   AppNodeBuilder.build(nodes, [...replacements, PluginSupervisor.node.replace(subagentPluginSupervisor)]),
 )
+// Merged by reference as well, so TestLLM.Test resolves to the memoized instance the graph's client uses.
+const childLLM = TestLLM.testLayer({ fallback: TestLLM.text(childText, "completion") })
 const completionIt = testEffect(
-  AppNodeBuilder.build(LayerNode.group([nodes, SessionRestart.node, KV.node, SubagentJob.node]), [
-    Global.node.replace(tempGlobalLayer),
-    offlineModels,
-    PluginSupervisor.node.replace(subagentPluginSupervisor),
-    LayerNodePlatform.llmClient.replace(TestLLM.testLayer({ fallback: TestLLM.text(childText, "completion") })),
-    SessionRunnerModel.node.replace(
-      Layer.succeed(SessionRunnerModel.Service, {
-        resolve: () =>
-          Effect.succeed(
-            SessionRunnerModel.resolved(
-              LanguageModel.make({ id: "child", provider: "test", route: OpenAIChat.route }),
-              {
-                capabilities: { tools: true, input: ["text"], output: ["text"] },
-                cost: [],
-                limit: { context: 200_000, output: 32_000 },
-              },
+  Layer.mergeAll(
+    AppNodeBuilder.build(LayerNode.group([nodes, SessionRestart.node, KV.node, SubagentJob.node]), [
+      Global.node.replace(tempGlobalLayer),
+      offlineModels,
+      PluginSupervisor.node.replace(subagentPluginSupervisor),
+      LayerNodePlatform.llmClient.replace(childLLM),
+      SessionRunnerModel.node.replace(
+        Layer.succeed(SessionRunnerModel.Service, {
+          resolve: () =>
+            Effect.succeed(
+              SessionRunnerModel.resolved(
+                LanguageModel.make({ id: "child", provider: "test", route: OpenAIChat.route }),
+                {
+                  capabilities: { tools: true, input: ["text"], output: ["text"] },
+                  cost: [],
+                  limit: { context: 200_000, output: 32_000 },
+                },
+              ),
             ),
-          ),
-      }),
-    ),
-  ]),
+        }),
+      ),
+    ]),
+    childLLM,
+  ),
 )
 
 const withSubagent = (location: Location.Ref) =>
@@ -269,6 +274,121 @@ describe("SubagentTool", () => {
           expect(output).toContain("- subagent: audit dependencies (sessionID: ses_grandchild)")
           expect(output).not.toContain("bun test")
           yield* Effect.all([jobs.cancel("shell-dev"), jobs.cancel("grandchild")], { discard: true })
+        }),
+      ),
+    ),
+  )
+
+  // A caller that will act on the answer declares the fields it needs back. The child is told to end
+  // with them, and an answer that does not carry them fails the call with what it said, instead of
+  // handing the caller prose to guess at.
+  completionIt.live("returns the fields a caller declared, and fails an answer that does not carry them", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const llm = yield* TestLLM.Test
+          const parent = yield* sessions.create({
+            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
+            model: parentModel,
+          })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const output = [
+            { name: "summary", description: "What was found", type: "string" as const },
+            { name: "count", description: "How many", type: "number" as const },
+          ]
+          const call = (id: string) =>
+            executeTool(registry, {
+              sessionID: parent.id,
+              ...toolIdentity,
+              call: {
+                type: "tool-call",
+                id,
+                name: SubagentTool.name,
+                input: { agent: "reviewer", description: "audit", prompt: "audit the deps", output },
+              },
+            })
+
+          yield* llm.push(TestLLM.text('Checked.\n```json\n{ "summary": "two advisories", "count": 2 }\n```', "fields"))
+          const answered = yield* call("call-fields")
+          expect(answered).toMatchObject({ status: "completed", metadata: { status: "completed" } })
+          const child = outputSessionID(answered.metadata)
+          expect(answered.content).toEqual([
+            {
+              type: "text",
+              text: `<subagent sessionID="${child}" state="completed">\n${JSON.stringify({ summary: "two advisories", count: 2 }, null, 2)}\n</subagent>`,
+            },
+          ])
+          // The child was told which fields to end with.
+          expect(JSON.stringify((yield* llm.requests()).at(-1)?.messages)).toContain("- count (number): How many")
+
+          yield* llm.push(TestLLM.text("Two advisories, nothing else to report.", "prose"))
+          expect(yield* call("call-prose")).toMatchObject({
+            status: "error",
+            error: {
+              message: expect.stringMatching(
+                /^Subagent did not return the requested fields \(sessionID: ses_\w+\): the final block is not valid JSON\. It answered: Two advisories, nothing else to report\.$/,
+              ),
+            },
+          })
+        }),
+      ),
+    ),
+  )
+
+  completionIt.live("checks declared fields when a background subagent's answer is delivered", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const jobs = yield* Job.Service
+          const llm = yield* TestLLM.Test
+          const parent = yield* sessions.create({
+            location: Location.Ref.make({ directory: AbsolutePath.make(dir.path) }),
+            model: parentModel,
+          })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+
+          yield* llm.push(TestLLM.text("Found two, details below.", "prose"))
+          const result = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-background-fields",
+              name: SubagentTool.name,
+              input: {
+                agent: "reviewer",
+                description: "background audit",
+                prompt: "audit",
+                background: true,
+                output: [{ name: "count", description: "How many", type: "number" }],
+              },
+            },
+          })
+          yield* jobs.pendingBackground.pipe(Effect.repeat({ until: (pending) => pending.length === 0 }))
+          // Delivery admits the result to the caller's inbox; it is visible once the caller's run promotes it.
+          yield* sessions.wait(parent.id)
+          const delivered = (yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")
+          expect(delivered).toEqual([
+            expect.objectContaining({
+              text: expect.stringContaining('state="error"'),
+              metadata: expect.objectContaining({ state: "error", childID: outputSessionID(result.metadata) }),
+            }),
+          ])
+          expect(delivered[0]?.type === "synthetic" && delivered[0].text).toContain(
+            "It answered: Found two, details below.",
+          )
         }),
       ),
     ),
