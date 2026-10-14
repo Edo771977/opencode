@@ -49,6 +49,7 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
         hidden: info.hidden,
         color: info.color === undefined ? undefined : info.color.startsWith("#") ? info.color : "#aaaaaa",
         steps: info.steps,
+        small: info.small,
         disabled: info.disable,
         permissions: permissions(info.permission),
       }),
@@ -234,9 +235,7 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, npm: string | un
     capabilities,
     headers: info.headers,
     body: migrated?.body,
-    variants:
-      info.variants &&
-      Object.entries(info.variants).map(([id, options]) => ({ id, ...split(options) })),
+    variants: info.variants && Object.entries(info.variants).map(([id, options]) => ({ id, ...split(options) })),
     cost: costs,
     disabled: info.status === "deprecated" ? true : undefined,
     limit: info.limit && {

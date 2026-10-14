@@ -121,6 +121,22 @@ const fakeIdentity = identity("fake", "fake-model")
 const replacementIdentity = identity("fake", "replacement")
 const gptIdentity = identity("openai", "gpt-5")
 const replacementModel = testModel("replacement")
+// Models a session can be moved to by id, each with its own price, for steps that leave the session
+// model: the small model of an agent, and the model a budget degrades to.
+const smallModel = testModel("small-model")
+const selectableModels = new Map([[String(smallModel.id), smallModel]])
+const usd = (perMillion: number) => Money.USDPerMillionTokens.make(perMillion)
+const modelCosts = new Map([
+  [String(model.id), [{ input: usd(10), output: usd(30), cache: { read: usd(1), write: usd(1) } }]],
+  [String(smallModel.id), [{ input: usd(1), output: usd(3), cache: { read: usd(0.1), write: usd(0.1) } }]],
+])
+const catalogModel = (id: string, options: { tools?: boolean; variants?: string[]; family?: string } = {}) =>
+  Model.Info.make({
+    ...Model.Info.default(Provider.ID.make("fake"), ID.make(id)),
+    ...(options.family ? { family: Model.Family.make(options.family) } : {}),
+    capabilities: { tools: options.tools ?? true, input: ["text"], output: ["text"] },
+    variants: (options.variants ?? []).map((variant) => ({ id: Model.VariantID.make(variant) })),
+  })
 const compactModel = testModel("compact", { context: 4_000, output: 50 })
 const fullOutputModel = testModel("full-output", { context: 262_144, output: 262_144 })
 const unknownContextModel = testModel("unknown-context", { context: 0, output: 32_000 })
@@ -209,6 +225,8 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     }).pipe(Effect.andThen(Deferred.succeed(barrier.release, undefined)), Effect.asVoid)
   return {
     currentModel: model,
+    catalog: [] as Model.Info[],
+    priced: false,
     compaction,
     modelResolveHook: resolvesModel,
     systemBaseline: "Initial context",
@@ -323,10 +341,13 @@ const layer = Layer.unwrap(
       resolve: (session) =>
         state.modelResolveHook.pipe(
           Effect.map(() => {
-            const selected = session.model?.id === "replacement" ? replacementModel : state.currentModel
+            const selected =
+              session.model?.id === "replacement"
+                ? replacementModel
+                : (selectableModels.get(String(session.model?.id)) ?? state.currentModel)
             return SessionRunnerModel.resolved(selected, {
               capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-              cost: [],
+              cost: state.priced ? (modelCosts.get(String(selected.id)) ?? []) : [],
               limit: modelLimits.get(String(selected.id)) ?? defaultModelLimit,
               variant: session.model?.variant,
               compaction: state.compaction,
@@ -404,11 +425,13 @@ const layer = Layer.unwrap(
       }),
     ])
     const promptModels = Layer.mock(Model.Service, {
-      get: () => Effect.undefined,
-      all: () => Effect.succeed([]),
-      available: () => Effect.succeed([]),
+      get: (providerID, id) =>
+        Effect.sync(() => state.catalog.find((item) => item.providerID === providerID && item.id === id)),
+      all: () => Effect.sync(() => state.catalog),
+      available: () => Effect.sync(() => state.catalog),
       default: () => Effect.undefined,
-      small: () => Effect.undefined,
+      small: (providerID) =>
+        Effect.sync(() => state.catalog.find((item) => item.providerID === providerID && item.family !== undefined)),
     })
     const replacements: LayerNode.Replacements = [
       Snapshot.node.replace(Snapshot.noopLayer),
@@ -6637,5 +6660,117 @@ describe("SessionRunnerLLM", () => {
     expect(defect).toBeInstanceOf(Error)
     if (!(defect instanceof Error)) return
     expect(defect.message).toBe("Tool input delta before start: call-1")
+  })
+})
+
+// AGENTS.md, "Models and Variants" and "Testing the Session Loop": each case drives the runner against
+// TestLLM and reads the request that reached the wire and the message the step recorded, because a
+// model chosen correctly and then not applied is invisible to a test over the choice alone.
+describe("a step on another model than the session's", () => {
+  const selectSession = (s: Scenario, variant?: string) =>
+    s.bus.publish(SessionEvent.ModelSelected, {
+      sessionID,
+      model: {
+        id: ID.make(String(model.id)),
+        providerID: Provider.ID.make("fake"),
+        ...(variant ? { variant: Model.VariantID.make(variant) } : {}),
+      },
+    })
+  const configure = (small: boolean, title?: { id: string; variant?: string }) =>
+    Effect.gen(function* () {
+      const agents = yield* Agent.Service
+      yield* agents.transform((editor) => {
+        editor.update(Agent.ID.make("build"), (agent) => {
+          agent.small = small
+        })
+        if (title)
+          editor.update(Agent.ID.make("title"), (agent) => {
+            agent.model = {
+              id: ID.make(title.id),
+              providerID: Provider.ID.make("fake"),
+              ...(title.variant ? { variant: Model.VariantID.make(title.variant) } : {}),
+            }
+          })
+      })
+    })
+  const answeredBy = (s: Scenario) =>
+    Effect.gen(function* () {
+      const assistant = requireAssistant(yield* s.messages)
+      return assistant.type === "assistant" ? assistant : undefined
+    })
+
+  scenario("runs an agent with small on the title agent's model, with the variant written next to it", function* (s) {
+    s.catalog = [catalogModel("small-model", { variants: ["fast"] })]
+    yield* selectSession(s, "high")
+    yield* configure(true, { id: "small-model", variant: "fast" })
+    yield* s.llm.push(TestLLM.text("Done", "small-answer"))
+    yield* s.runPrompt("Sort this")
+
+    expect(s.requests.map((request) => request.model)).toEqual([smallModel])
+    expect((yield* answeredBy(s))?.model).toEqual({
+      id: ID.make("small-model"),
+      providerID: Provider.ID.make("fake"),
+      variant: Model.VariantID.make("fast"),
+    })
+  })
+
+  scenario("never carries the session's variant to the small model", function* (s) {
+    // Found by family, as `Model.small` finds it: no variant was written for it, and the session's
+    // `high` belongs to the session model.
+    s.catalog = [catalogModel("small-model", { family: "claude-haiku", variants: ["high"] })]
+    yield* selectSession(s, "high")
+    yield* configure(true)
+    yield* s.llm.push(TestLLM.text("Done", "small-answer"))
+    yield* s.runPrompt("Sort this")
+
+    expect(s.requests.map((request) => request.model)).toEqual([smallModel])
+    expect((yield* answeredBy(s))?.model).toEqual({ id: ID.make("small-model"), providerID: Provider.ID.make("fake") })
+  })
+
+  scenario("drops a variant the small model does not offer", function* (s) {
+    s.catalog = [catalogModel("small-model")]
+    yield* configure(true, { id: "small-model", variant: "fast" })
+    yield* s.llm.push(TestLLM.text("Done", "small-answer"))
+    yield* s.runPrompt("Sort this")
+
+    expect((yield* answeredBy(s))?.model).toEqual({ id: ID.make("small-model"), providerID: Provider.ID.make("fake") })
+  })
+
+  scenario("keeps the session model when the small model cannot call tools", function* (s) {
+    s.catalog = [catalogModel("small-model", { tools: false, family: "claude-haiku" })]
+    yield* configure(true, { id: "small-model" })
+    yield* s.llm.push(TestLLM.text("Done", "session-answer"))
+    yield* s.runPrompt("Sort this")
+
+    expect(s.requests.map((request) => request.model)).toEqual([model])
+  })
+
+  scenario("treats a small model that is the session model as none, and looks further", function* (s) {
+    s.catalog = [catalogModel(String(model.id)), catalogModel("small-model", { family: "claude-haiku" })]
+    yield* configure(true, { id: String(model.id) })
+    yield* s.llm.push(TestLLM.text("Done", "small-answer"))
+    yield* s.runPrompt("Sort this")
+
+    expect(s.requests.map((request) => request.model)).toEqual([smallModel])
+  })
+
+  scenario("leaves an agent without small on the session model", function* (s) {
+    s.catalog = [catalogModel("small-model", { family: "claude-haiku" })]
+    yield* configure(false, { id: "small-model" })
+    yield* s.llm.push(TestLLM.text("Done", "session-answer"))
+    yield* s.runPrompt("Sort this")
+
+    expect(s.requests.map((request) => request.model)).toEqual([model])
+  })
+
+  scenario("charges a step to the model that answered it", function* (s) {
+    s.priced = true
+    s.catalog = [catalogModel("small-model")]
+    yield* configure(true, { id: "small-model" })
+    yield* s.llm.push(TestLLM.textWithUsage("Done", "small-answer", 1_000_000))
+    yield* s.runPrompt("Sort this")
+
+    // A million input tokens at the small model's price, not the session model's ten dollars.
+    expect(Number((yield* answeredBy(s))?.cost)).toBe(1)
   })
 })

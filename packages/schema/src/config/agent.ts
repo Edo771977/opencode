@@ -17,6 +17,10 @@ export class Info extends Schema.Class<Info>("Config.Agent")({
   hidden: Schema.Boolean.pipe(optional),
   color: Color.pipe(optional),
   steps: PositiveInt.pipe(optional),
+  small: Schema.Boolean.pipe(optional).annotate({
+    description:
+      "Run this agent on the small model: the title agent's model, else a cheaper model of the session's provider. It must call tools and differ from the session model, or the session model is used.",
+  }),
   disabled: Schema.Boolean.pipe(optional),
   permissions: Permission.Ruleset.pipe(optional),
 }) {}

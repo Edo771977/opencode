@@ -160,8 +160,50 @@ const layer = Layer.effect(
       }
     })
 
+    // The model an agent with `small` runs on. The title agent's model is where V2 keeps the
+    // `small_model` a V1 config sets, so it comes first; then a cheaper model of the session's own
+    // provider. A candidate must call tools, because a step carries tool definitions, and must differ
+    // from the session model in provider as well as id: the same id elsewhere is another route,
+    // other credentials and other billing. Only a variant written next to the title model travels
+    // with it, and only when that model offers it; the session's variant belongs to the session model.
+    const resolveSmall = Effect.fn("SessionContext.resolveSmall")(function* (
+      session: SessionSchema.Info,
+      primary: SessionRunnerModel.Resolved,
+    ) {
+      const title = yield* agents.get(Agent.ID.make("title"))
+      const configured = title?.model ? yield* model.get(title.model.providerID, title.model.id) : undefined
+      const fallback = yield* model.small(primary.ref.providerID)
+      const candidates = [
+        ...(configured ? [{ info: configured, variant: title?.model?.variant }] : []),
+        ...(fallback ? [{ info: fallback, variant: undefined }] : []),
+      ].filter(
+        (candidate) =>
+          candidate.info.capabilities.tools &&
+          !(candidate.info.providerID === primary.ref.providerID && candidate.info.id === primary.ref.id),
+      )
+      for (const candidate of candidates) {
+        const variant = candidate.info.variants.some((item) => item.id === candidate.variant)
+          ? candidate.variant
+          : undefined
+        const resolved = yield* resolveModel({
+          ...session,
+          model: Model.Ref.make({
+            providerID: candidate.info.providerID,
+            id: candidate.info.id,
+            ...(variant ? { variant } : {}),
+          }),
+        }).pipe(Effect.orElseSucceed(() => undefined))
+        if (resolved) return resolved
+      }
+      // A missing small model never fails a step: the agent runs on the session model.
+      return primary
+    })
+
     const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
-      const model = yield* resolveModel(selection.session)
+      const primary = yield* resolveModel(selection.session)
+      // Resolved here rather than at the request, so that the history, the compaction ceiling, the
+      // prompt estimate, the request and its cost all follow the model that answers the step.
+      const model = selection.agent.info.small ? yield* resolveSmall(selection.session, primary) : primary
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,

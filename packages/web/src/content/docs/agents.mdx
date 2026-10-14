@@ -370,6 +370,39 @@ The model ID in your OpenCode config uses the format `provider/model-id`. For ex
 
 ---
 
+### Small model
+
+Set `small` to run an agent on a cheaper, faster model without naming one per agent. Useful for agents whose work is routine enough that the main model is not worth its cost.
+
+```json title="opencode.json"
+{
+  "agent": {
+    "triage": {
+      "description": "Sorts incoming issues",
+      "mode": "subagent",
+      "small": true
+    }
+  }
+}
+```
+
+The model is picked in this order:
+
+1. The model of the `title` agent, if you set one and it is available. This is where [`small_model`](/docs/config#models) goes, and it may name a variant: `anthropic/claude-haiku-4-5#fast`.
+2. Otherwise a cheaper model of the session's own provider, when one is known for it.
+3. Otherwise the session model, unchanged.
+
+A few things to know:
+
+- `small` applies to every step the agent takes, and it outranks the agent's own `model`.
+- A model that cannot call tools is never picked, because every step carries tool definitions.
+- A small model that is the session model, same provider and same id, counts as none.
+- The session's variant is never carried over. A variant is chosen for one model, so the step is sent with the variant written next to the small model, when that model offers it, and otherwise with the model's own default.
+- A missing small model never fails a step: the agent runs on the session model.
+- The model that answered is the one recorded on the message, and its price is the one the step is charged at.
+
+---
+
 ### Tools (deprecated)
 
 `tools` is **deprecated**. Prefer the agent's [`permission`](#permissions) field for new configs, updates and more fine-grained control.

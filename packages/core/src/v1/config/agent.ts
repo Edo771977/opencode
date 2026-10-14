@@ -35,6 +35,9 @@ const AgentSchema = Schema.StructWithRest(
       description: "Maximum number of agentic iterations before forcing text-only response",
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
+    // A key this schema does not name is a provider option and is sent with the request, so a
+    // setting of this fork's own V1 agents has to be named here to stay out of the request body.
+    small: Schema.optional(Schema.Boolean),
     permission: Schema.optional(ConfigPermissionV1.Info),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
