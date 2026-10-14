@@ -2,7 +2,7 @@ export * as SessionRunnerLLM from "./llm.js"
 
 import { Message } from "@opencode/ai"
 import { and, desc, eq, sql } from "drizzle-orm"
-import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
+import { Cause, Effect, Exit, FiberMap, Layer, Option } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
 import { LocationLifecycle } from "../../location-lifecycle.js"
@@ -31,6 +31,8 @@ import { SessionStep } from "./step.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
+import { SessionBudget } from "./budget.js"
+import { Permission } from "../../permission.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -48,6 +50,10 @@ const layer = Layer.effect(
     const plugins = yield* Plugin.Service
     const title = yield* SessionTitle.Service
     const steps = yield* SessionStep.make
+    const permission = yield* Permission.Service
+    // Requests past the budget that somebody agreed to pay for, by Session and the sequence of the
+    // person's message that opened them. Process-local, like the drains it answers for.
+    const authorized = new Set<string>()
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
 
@@ -202,6 +208,48 @@ const layer = Layer.effect(
       return selected
     })
 
+    // `budget` degrades and `budget_stop` stops; the `budget` permission can make the first ask or
+    // stop instead. Checked before every step, so the step that crosses a threshold runs to its end
+    // and the decision applies from the next one. It reads the level rather than the crossing: an
+    // agent past its budget is past it on every later step.
+    const decideBudget = Effect.fn("SessionRunner.decideBudget")(function* (
+      loaded: SessionContext.Loaded,
+      stepLimitReached: boolean,
+    ) {
+      const info = loaded.agent.info
+      if (info.budget === undefined && info.budget_stop === undefined) return { type: "run" } as const
+      const spent = yield* SessionBudget.spend(db, loaded.session.id, loaded.agent.id)
+      if (info.budget_stop !== undefined && spent.request >= info.budget_stop)
+        return { type: "end", prompt: SessionBudget.STOP_PROMPT } as const
+      if (info.budget === undefined || spent.session < info.budget) return { type: "run" } as const
+      const request = `${loaded.session.id}:${spent.request_seq}`
+      if (authorized.has(request)) return { type: "run" } as const
+      const input = {
+        sessionID: loaded.session.id,
+        agent: loaded.agent.id,
+        action: "budget",
+        resources: [loaded.agent.id],
+        named: true,
+        metadata: { spent: spent.session, budget: info.budget },
+      }
+      const effect = yield* permission.evaluate(input).pipe(Effect.orDie)
+      if (effect === "allow") return spent.notified ? ({ type: "degrade" } as const) : ({ type: "notify" } as const)
+      if (effect === "deny") return { type: "end", prompt: SessionBudget.declinedPrompt(undefined) } as const
+      // A question a yes cannot change only makes a run that is about to stop wait for somebody.
+      if (stepLimitReached) return { type: "run" } as const
+      const answer = yield* permission.assert(input).pipe(Effect.exit)
+      if (Exit.isSuccess(answer)) {
+        // An authorized run keeps its model and tools for the rest of this request.
+        authorized.add(request)
+        return { type: "run" } as const
+      }
+      if (Cause.hasInterruptsOnly(answer.cause)) return yield* Effect.interrupt
+      const error = Cause.findErrorOption(answer.cause)
+      const reason =
+        Option.isSome(error) && error.value instanceof Permission.CorrectedError ? error.value.feedback : undefined
+      return { type: "end", prompt: SessionBudget.declinedPrompt(reason) } as const
+    })
+
     /** Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. */
     const runStep = Effect.fn("SessionRunner.runStep")(function* (first: SessionContext.Loaded, step: number) {
       const sessionID = first.session.id
@@ -210,17 +258,40 @@ const layer = Layer.effect(
       let initial: SessionContext.Loaded | undefined = first
       let recoverOverflow = true
       let recoverContinuation = true
+      let notified = false
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
-        const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
+        const selected =
+          initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap((selection) => context.load(selection))))
         initial = undefined
+        const stepLimitReached = selected.agent.info.steps !== undefined && step >= selected.agent.info.steps
+        const budget = yield* decideBudget(selected, stepLimitReached)
+        if (budget.type === "notify" && !notified) {
+          // Told once, durably, so a reload sees it and a later step does not repeat it.
+          notified = true
+          yield* bus.publish(SessionEvent.Synthetic, {
+            sessionID,
+            text: SessionBudget.NOTICE,
+            description: "Budget reached",
+            metadata: { source: SessionBudget.NOTICE_SOURCE, agent: selected.agent.id },
+          })
+          continue
+        }
+        // Degrading reloads, so that history, compaction, the request and its cost follow the small model.
+        const loaded =
+          budget.type === "degrade" || budget.type === "notify"
+            ? yield* prepareContext(sessionID).pipe(
+                Effect.flatMap((selection) => context.load(selection, { small: true })),
+              )
+            : selected
         const compacted = yield* compaction.compact({ reason: "auto", context: loaded })
         if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
         if (compacted.status === "completed") {
           assistantMessageID = SessionMessage.ID.create()
           continue
         }
-        const stepLimitReached = loaded.agent.info.steps !== undefined && step >= loaded.agent.info.steps
+        // Both endings are one step without tools that summarizes what was done and what is left.
+        const ending = budget.type === "end" ? budget.prompt : stepLimitReached ? MAX_STEPS_PROMPT : undefined
         const transcript = SessionModelRequest.baseTranscript({
           agent: loaded.agent.info,
           model: loaded.model,
@@ -234,11 +305,9 @@ const layer = Layer.effect(
           model: loaded.model,
           tools: loaded.tools,
           system: transcript.system,
-          messages: stepLimitReached
-            ? [...transcript.messages, Message.assistant(MAX_STEPS_PROMPT)]
-            : transcript.messages,
+          messages: ending ? [...transcript.messages, Message.assistant(ending)] : transcript.messages,
           // Keep tool definitions on the final Step to preserve the provider's cached prefix.
-          toolChoice: stepLimitReached ? "none" : undefined,
+          toolChoice: ending ? "none" : undefined,
           webSocket: "session",
           inputTokens: SessionCompaction.estimatePrompt(loaded),
         })
@@ -292,7 +361,8 @@ const layer = Layer.effect(
             recoverContinuation = false
           }),
         })
-        if (completed !== undefined) return completed
+        // A budget ending ends the request even if the summary asked to go on.
+        if (completed !== undefined) return budget.type === "end" ? false : completed
       }
     })
 
@@ -371,5 +441,6 @@ export const node = makeLocationNode({
     Snapshot.node,
     ToolOutput.node,
     Database.node,
+    Permission.node,
   ],
 })

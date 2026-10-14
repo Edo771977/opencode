@@ -2086,6 +2086,8 @@ export type AgentInfo = {
   color?: AgentColor
   steps?: number
   small?: boolean
+  budget?: number
+  budget_stop?: number
   permissions: PermissionRuleset
 }
 
@@ -2166,6 +2168,8 @@ export type ConfigEntry =
             color?: string
             steps?: number
             small?: boolean
+            budget?: number
+            budget_stop?: number
             disabled?: boolean
             permissions?: PermissionRuleset
           }

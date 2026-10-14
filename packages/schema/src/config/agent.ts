@@ -21,6 +21,14 @@ export class Info extends Schema.Class<Info>("Config.Agent")({
     description:
       "Run this agent on the small model: the title agent's model, else a cheaper model of the session's provider. It must call tools and differ from the session model, or the session model is used.",
   }),
+  budget: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional).annotate({
+    description:
+      "US dollars this agent may spend in a session before it degrades to the small model. It does not stop the agent; the budget permission can make it ask or stop instead.",
+  }),
+  budget_stop: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional).annotate({
+    description:
+      "US dollars this agent may spend answering one request. Past it the agent gets one step without tools to summarize what was done and what is left.",
+  }),
   disabled: Schema.Boolean.pipe(optional),
   permissions: Permission.Ruleset.pipe(optional),
 }) {}

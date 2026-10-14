@@ -681,9 +681,13 @@ describe("ConfigNormalize", () => {
 
   // An agent key the V1 schema does not name is a provider option and goes out with every request,
   // so this fork's own V1 agent settings have to be named to land where they belong.
-  test("carries the fork's small agent flag out of a V1 file, and keeps it out of the request body", () => {
-    const result = normalized({ agent: { build: { small: true, temperature: 0.2 } } })
-    expect(result.encoded.agents).toEqual({ build: { small: true, request: { body: { temperature: 0.2 } } } })
+  test("carries the fork's agent settings out of a V1 file, and keeps them out of the request body", () => {
+    const result = normalized({
+      agent: { build: { small: true, budget: 2, budget_stop: 5, temperature: 0.2 } },
+    })
+    expect(result.encoded.agents).toEqual({
+      build: { small: true, budget: 2, budget_stop: 5, request: { body: { temperature: 0.2 } } },
+    })
   })
 
   // AGENTS.md, "Configuration Compatibility": a setting written wrongly costs its own key, in either

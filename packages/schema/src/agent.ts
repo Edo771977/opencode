@@ -32,6 +32,8 @@ export const Info = Schema.Struct({
   color: Color.pipe(optional),
   steps: PositiveInt.pipe(optional),
   small: Schema.Boolean.pipe(optional),
+  budget: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
+  budget_stop: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
   permissions: Permission.Ruleset,
 })
   .annotate({ identifier: "Agent.Info" })

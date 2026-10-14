@@ -148,6 +148,32 @@ describe("Permission", () => {
     }),
   )
 
+  // AGENTS.md: only a rule naming `budget` decides the budget checkpoint, never a ruleset's catch-all,
+  // which is about tools and which several built-in agents set to deny.
+  it.effect("decides a named action only by rules that name it, and allows it when none does", () =>
+    Effect.gen(function* () {
+      const service = yield* Permission.Service
+      const budget = assertion({ action: "budget", resources: ["build"], named: true })
+      yield* setup([{ action: "*", resource: "*", effect: "deny" }])
+      expect(yield* service.evaluate(budget)).toBe("allow")
+      yield* setRules([{ action: "*", resource: "*", effect: "ask" }])
+      expect(yield* service.evaluate(budget)).toBe("allow")
+      yield* setRules([
+        { action: "*", resource: "*", effect: "allow" },
+        { action: "budget", resource: "*", effect: "ask" },
+      ])
+      expect(yield* service.evaluate(budget)).toBe("ask")
+      yield* setRules([{ action: "budget", resource: "*", effect: "deny" }])
+      expect(yield* service.evaluate(budget)).toBe("deny")
+      // A rule for another agent's budget does not decide this one.
+      yield* setRules([{ action: "budget", resource: "reviewer", effect: "deny" }])
+      expect(yield* service.evaluate(budget)).toBe("allow")
+      // The same rules without `named` keep their usual meaning.
+      yield* setRules([{ action: "*", resource: "*", effect: "deny" }])
+      expect(yield* service.evaluate(assertion({ action: "budget", resources: ["build"] }))).toBe("deny")
+    }),
+  )
+
   test("matches Windows rule resources against slash-normalized file access resources", () => {
     const rules: Permission.Ruleset = [
       { action: "external_directory", resource: "C:\\Users\\x\\proj\\*", effect: "allow" },

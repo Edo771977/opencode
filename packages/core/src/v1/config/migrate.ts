@@ -50,6 +50,8 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
         color: info.color === undefined ? undefined : info.color.startsWith("#") ? info.color : "#aaaaaa",
         steps: info.steps,
         small: info.small,
+        budget: info.budget,
+        budget_stop: info.budget_stop,
         disabled: info.disable,
         permissions: permissions(info.permission),
       }),

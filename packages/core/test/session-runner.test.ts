@@ -227,6 +227,9 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     currentModel: model,
     catalog: [] as Model.Info[],
     priced: false,
+    budgetPermission: "allow" as Permission.Rule["effect"],
+    budgetAnswer: Effect.void as Effect.Effect<void, Permission.Error>,
+    budgetQuestions: [] as Permission.AssertInput[],
     compaction,
     modelResolveHook: resolvesModel,
     systemBaseline: "Initial context",
@@ -284,7 +287,6 @@ const permissionFail = {
       }),
     }),
 }
-const permission = permissionLayer()
 const transformTools = (registry: Tool.Interface, tools: Readonly<Record<string, ToolInfo>>, options?: Tool.Options) =>
   registry.transform((editor) =>
     Object.entries(tools).forEach(([name, tool]) => editor.add({ ...tool, name, options: options ?? tool.options })),
@@ -442,7 +444,22 @@ const layer = Layer.unwrap(
       Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
       SkillInstructions.node.replace(skillInstructions),
       ReferenceInstructions.node.replace(referenceInstructions),
-      Permission.node.replace(permission),
+      // Only the budget checkpoint asks through the service here; tools reject through their own leaves.
+      Permission.node.replace(
+        permissionLayer({
+          evaluate: (input) =>
+            input.action === "budget"
+              ? Effect.sync(() => state.budgetPermission)
+              : Effect.die(new Error(`Unexpected permission evaluation: ${input.action}`)),
+          assert: (input) =>
+            input.action === "budget"
+              ? Effect.suspend(() => {
+                  state.budgetQuestions.push(input)
+                  return state.budgetAnswer
+                })
+              : Effect.die(new Error(`Unexpected permission assertion: ${input.action}`)),
+        }),
+      ),
       Config.node.replace(config),
       PluginSupervisor.node.replace(Layer.empty),
       Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
@@ -6772,5 +6789,160 @@ describe("a step on another model than the session's", () => {
 
     // A million input tokens at the small model's price, not the session model's ten dollars.
     expect(Number((yield* answeredBy(s))?.cost)).toBe(1)
+  })
+})
+
+// AGENTS.md, "Agents, Models and Cost": `budget` degrades, `budget_stop` stops, and the `budget`
+// permission decides whether degrading asks or stops instead. Prices are known, so the spend each
+// step adds is exact: a hundred thousand input tokens cost one dollar on the session model and ten
+// cents on the small one.
+describe("an agent with a budget", () => {
+  const costly = (text: string, id: string) => TestLLM.textWithUsage(text, id, 100_000)
+  const costlyTool = (id: string) =>
+    TestLLM.complete(
+      { reason: { normalized: "tool-calls" }, usage: { inputTokens: 100_000, nonCachedInputTokens: 100_000 } },
+      LLMEvent.toolCall({ id, name: "echo", input: { text: "work" } }),
+    )
+  const configure = (budget: { budget?: number; budget_stop?: number; steps?: number }) =>
+    Effect.gen(function* () {
+      const agents = yield* Agent.Service
+      yield* agents.transform((editor) => {
+        editor.update(Agent.ID.make("build"), (agent) => {
+          Object.assign(agent, budget)
+        })
+        editor.update(Agent.ID.make("title"), (agent) => {
+          agent.model = { id: ID.make("small-model"), providerID: Provider.ID.make("fake") }
+        })
+      })
+    })
+  const prepare = (s: Scenario) => {
+    s.priced = true
+    s.catalog = [catalogModel("small-model")]
+  }
+  const sent = (request: LLMRequest | undefined) => JSON.stringify(request?.messages ?? [])
+  const notices = (s: Scenario) =>
+    s.messages.pipe(
+      Effect.map((messages) =>
+        messages.filter((message) => message.type === "synthetic" && message.metadata?.source === "budget"),
+      ),
+    )
+
+  scenario("degrades past the budget onto the small model, and says so once", function* (s) {
+    prepare(s)
+    yield* configure({ budget: 1 })
+    yield* s.llm.push(costly("First", "first"))
+    yield* s.runPrompt("One")
+    yield* s.llm.push(TestLLM.text("Second", "second"))
+    yield* s.runPrompt("Two")
+    yield* s.llm.push(TestLLM.text("Third", "third"))
+    yield* s.runPrompt("Three")
+
+    expect(s.requests.map((request) => request.model)).toEqual([model, smallModel, smallModel])
+    expect(sent(s.requests[1])).toContain("Your spending budget for this session has been reached")
+    expect(yield* notices(s)).toHaveLength(1)
+  })
+
+  scenario("stops a request at its ceiling with one step without tools, and starts the next over", function* (s) {
+    prepare(s)
+    yield* configure({ budget_stop: 1 })
+    yield* s.llm.push(costlyTool("call-costly"), TestLLM.text("Summary", "summary"))
+    yield* s.runPrompt("One")
+
+    expect(s.requests).toHaveLength(2)
+    expect(s.requests[0]?.toolChoice).toBeUndefined()
+    expect(s.requests[1]?.toolChoice).toEqual({ type: "none" })
+    expect(sent(s.requests[1])).toContain("SPENDING LIMIT REACHED")
+
+    yield* s.llm.push(TestLLM.text("Fresh", "fresh"))
+    yield* s.runPrompt("Two")
+    expect(s.requests[2]?.toolChoice).toBeUndefined()
+  })
+
+  scenario("counts runtime-written input as part of the request it continues", function* (s) {
+    prepare(s)
+    yield* configure({ budget_stop: 1 })
+    yield* s.llm.push(costly("First", "first"))
+    yield* s.runPrompt("One")
+    // What a background subagent's result looks like when it reaches its caller: no new request,
+    // so no fresh ceiling.
+    yield* s.llm.push(TestLLM.text("Summary", "summary"))
+    yield* s.session.synthetic({ sessionID, text: "Background result", resume: false })
+    yield* s.resume
+
+    expect(s.requests[1]?.toolChoice).toEqual({ type: "none" })
+  })
+
+  scenario("asks once per request past the budget, and an authorized request keeps its model and tools", function* (s) {
+    prepare(s)
+    s.budgetPermission = "ask"
+    yield* configure({ budget: 1 })
+    yield* s.llm.push(costly("First", "first"))
+    yield* s.runPrompt("One")
+    yield* s.llm.push(TestLLM.tool("call-echo", "echo", { text: "work" }), TestLLM.text("Done", "done"))
+    yield* s.runPrompt("Two")
+
+    expect(s.budgetQuestions).toHaveLength(1)
+    expect(s.budgetQuestions[0]).toMatchObject({ action: "budget", named: true })
+    expect(s.requests.slice(1).map((request) => request.model)).toEqual([model, model])
+    expect(s.requests.slice(1).map((request) => request.toolChoice)).toEqual([undefined, undefined])
+
+    yield* s.llm.push(TestLLM.text("Again", "again"))
+    yield* s.runPrompt("Three")
+    expect(s.budgetQuestions).toHaveLength(2)
+  })
+
+  scenario("ends a declined request in one summary step that carries the reason", function* (s) {
+    prepare(s)
+    s.budgetPermission = "ask"
+    s.budgetAnswer = Effect.fail(new Permission.CorrectedError({ feedback: "too expensive, stop here" }))
+    yield* configure({ budget: 1 })
+    yield* s.llm.push(costly("First", "first"))
+    yield* s.runPrompt("One")
+    yield* s.llm.push(TestLLM.text("Summary", "summary"))
+    yield* s.runPrompt("Two")
+
+    expect(s.requests).toHaveLength(2)
+    expect(s.requests[1]?.toolChoice).toEqual({ type: "none" })
+    expect(s.requests[1]?.model).toEqual(model)
+    expect(sent(s.requests[1])).toContain("too expensive, stop here")
+  })
+
+  scenario("ends every request past the budget when the budget is denied", function* (s) {
+    prepare(s)
+    s.budgetPermission = "deny"
+    yield* configure({ budget: 1 })
+    yield* s.llm.push(costly("First", "first"))
+    yield* s.runPrompt("One")
+    yield* s.llm.push(TestLLM.text("Summary", "summary-two"))
+    yield* s.runPrompt("Two")
+    yield* s.llm.push(TestLLM.text("Summary", "summary-three"))
+    yield* s.runPrompt("Three")
+
+    expect(s.requests.slice(1).map((request) => request.toolChoice)).toEqual([{ type: "none" }, { type: "none" }])
+    expect(s.budgetQuestions).toHaveLength(0)
+  })
+
+  scenario("does not ask on a step that ends the run anyway", function* (s) {
+    prepare(s)
+    s.budgetPermission = "ask"
+    yield* configure({ budget: 1, steps: 1 })
+    yield* s.llm.push(costly("First", "first"))
+    yield* s.runPrompt("One")
+    yield* s.llm.push(TestLLM.text("Last", "last"))
+    yield* s.runPrompt("Two")
+
+    expect(s.budgetQuestions).toHaveLength(0)
+    expect(sent(s.requests[1])).toContain("MAXIMUM STEPS REACHED")
+  })
+
+  scenario("runs the ceiling's summary on the agent's own model, not the one it degraded to", function* (s) {
+    prepare(s)
+    yield* configure({ budget: 1, budget_stop: 1 })
+    yield* s.llm.push(costlyTool("call-costly"), TestLLM.text("Summary", "summary"))
+    yield* s.runPrompt("One")
+
+    expect(s.requests.map((request) => request.model)).toEqual([model, model])
+    expect(s.requests[1]?.toolChoice).toEqual({ type: "none" })
+    expect(yield* notices(s)).toHaveLength(0)
   })
 })

@@ -43,6 +43,11 @@ export const AssertInput = Schema.Struct({
   id: ID.pipe(Schema.optional),
   ...RequestFields,
   agent: Agent.ID.pipe(Schema.optional),
+  /**
+   * Only rules naming this action decide it, and with none it is allowed. For a checkpoint that is
+   * not a tool: a catch-all is about tools, and several built-in agents deny everything by default.
+   */
+  named: Schema.Boolean.pipe(Schema.optional),
 }).annotate({ identifier: "Permission.AssertInput" })
 export type AssertInput = typeof AssertInput.Type
 
@@ -104,6 +109,8 @@ export interface Interface {
   readonly close: Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
   readonly assert: (input: AssertInput) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
+  /** What `assert` would do with this input, without asking. */
+  readonly evaluate: (input: AssertInput) => Effect.Effect<Permission.Effect, SessionErrors.NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly get: (id: ID) => Effect.Effect<Request | undefined>
   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
@@ -171,10 +178,16 @@ const layer = Layer.effect(
     }
 
     const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
-      const rules = yield* configured(input.sessionID, input.agent)
+      const configuredRules = yield* configured(input.sessionID, input.agent)
+      const rules = input.named ? configuredRules.filter((rule) => rule.action === input.action) : configuredRules
       if (denied(input, rules)) return { effect: "deny" as const, rules }
-      const all = [...rules, ...(yield* savedRules())]
-      const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+      const saved = yield* savedRules()
+      const all = [...rules, ...(input.named ? saved.filter((rule) => rule.action === input.action) : saved)]
+      const effects = input.resources.map((resource) =>
+        input.named && !all.some((rule) => Wildcard.match(resource, rule.resource))
+          ? "allow"
+          : evaluate(input.action, resource, all).effect,
+      )
       const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
       const event = yield* hooks.trigger("permission", "evaluate", {
         sessionID: input.sessionID,
@@ -336,7 +349,12 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.request).filter((request) => request.sessionID === sessionID)
     })
 
-    return Service.of({ ask, assert, reply, get, forSession, list, close })
+    const evaluatePermission = Effect.fn("Permission.evaluate")(function* (input: AssertInput) {
+      if (closed) return "deny" as const
+      return (yield* evaluateInput(input)).effect
+    })
+
+    return Service.of({ ask, assert, evaluate: evaluatePermission, reply, get, forSession, list, close })
   }),
 )
 

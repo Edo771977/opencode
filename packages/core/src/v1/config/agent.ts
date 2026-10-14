@@ -38,6 +38,8 @@ const AgentSchema = Schema.StructWithRest(
     // A key this schema does not name is a provider option and is sent with the request, so a
     // setting of this fork's own V1 agents has to be named here to stay out of the request body.
     small: Schema.optional(Schema.Boolean),
+    budget: Schema.optional(Schema.Finite),
+    budget_stop: Schema.optional(Schema.Finite),
     permission: Schema.optional(ConfigPermissionV1.Info),
   }),
   [Schema.Record(Schema.String, Schema.Any)],

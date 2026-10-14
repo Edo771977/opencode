@@ -51,8 +51,14 @@ export interface Loaded {
 export interface Interface {
   /** Selects the Session, agent, instructions, and tools used by subsequent work. */
   readonly select: (sessionID: SessionSchema.ID) => Effect.Effect<Selection, AgentNotFoundError>
-  /** Resolves the model and active history for that selection. */
-  readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
+  /**
+   * Resolves the model and active history for that selection. `small` puts the step on the small
+   * model whatever the agent says, which is how an agent past its budget degrades.
+   */
+  readonly load: (
+    selection: Selection,
+    options?: { readonly small?: boolean },
+  ) => Effect.Effect<Loaded, SessionRunnerModel.Error>
   readonly resolveModel: (
     session: SessionSchema.Info,
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
@@ -199,11 +205,15 @@ const layer = Layer.effect(
       return primary
     })
 
-    const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
+    const load = Effect.fn("SessionContext.load")(function* (
+      selection: Selection,
+      options?: { readonly small?: boolean },
+    ) {
       const primary = yield* resolveModel(selection.session)
       // Resolved here rather than at the request, so that the history, the compaction ceiling, the
       // prompt estimate, the request and its cost all follow the model that answers the step.
-      const model = selection.agent.info.small ? yield* resolveSmall(selection.session, primary) : primary
+      const model =
+        selection.agent.info.small || options?.small ? yield* resolveSmall(selection.session, primary) : primary
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,

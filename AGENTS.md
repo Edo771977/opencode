@@ -190,6 +190,16 @@ const table = sqliteTable("session", {
 - Run a step entirely on the model that answers it. Cost, the context window it is sized against, the history serialization and the tool definitions all follow the model the request goes to, not the one the Session started on. This fork got it wrong twice, once in each runtime.
 - A variant belongs to the model it was chosen for. Names collide across a provider's models, so apply one only when the request goes to that model, and record on the message the variant the request actually carried. A variant the model does not declare as its own is not a variant.
 
+## Agents and Cost
+
+- `budget` degrades, it does not stop: past it an agent keeps working on the small model and is told once. `budget_stop` is the ceiling, off unless asked for. A run meant to carry work to the end cannot depend on someone noticing that it halted.
+- The two thresholds count different spans. The budget counts the Session; the ceiling counts only the request being answered, so the next message the person sends starts over with its tools. Counted over the Session the ceiling ends the Session instead: spend never goes down, so every later request is answered by a summary that costs more than the last.
+- A request ends where the person's next message begins, and only there. Runtime-written input is a synthetic message — a background subagent's result delivered to its caller, a continuation after an interrupted stream, the budget's own notice — and it continues the request instead of starting one. Counted as requests of their own they hand the run a fresh ceiling and its tools back with nobody present. In a child Session the person is the caller, so each prompt the caller sends is a request.
+- The budget can ask instead of degrading, through the `budget` permission: `allow` degrades as before, `ask` asks once per request while past the budget, `deny` ends every request that goes past it. An authorized run keeps its model and tools; a refused one ends in the same step without tools as the ceiling, carrying the reason given.
+- That gate reads the level, not the step that crossed: an agent past its budget is past it on every later step. Only a rule naming `budget` decides it, never a ruleset's catch-all, which is about tools and which several built-in agents set to deny. It never asks on a step that already ends the run, because a question a yes cannot change only makes a run configured to stop wait for somebody.
+- A model resolved as small must still be able to call tools, and must differ from the session model in provider as well as id. The same id on another provider is a different route, different credentials and different billing.
+- A subagent reported as done must say what it left running. Spawning with `background: true` detaches, and the detached task's answer goes to the subagent's own Session, so a caller told only "completed" would act on a result that is missing a piece.
+
 ## Configuration Compatibility
 
 - A setting written wrongly costs its own key, not the file. Both shapes are read as a whole first and group by group when that fails.
