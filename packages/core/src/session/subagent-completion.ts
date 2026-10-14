@@ -4,6 +4,7 @@ import { Effect } from "effect"
 import type { Job } from "../job.js"
 import type { Session } from "../session.js"
 import type { SessionMessage } from "./message.js"
+import type { SessionSchema } from "./schema.js"
 
 export const NO_TEXT = "Subagent completed without a text response."
 
@@ -16,6 +17,42 @@ export function text(message: SessionMessage.Info | undefined) {
       .filter((text) => text.length > 0)
       .join("\n\n") || NO_TEXT
   )
+}
+
+/**
+ * Background work a Session started and has not finished: its own background shells, and the
+ * subagents it launched in the background. Each record names the Session that owns it.
+ */
+export const leftRunning = (jobs: Pick<Job.Interface, "pendingBackground">, sessionID: SessionSchema.ID) =>
+  jobs.pendingBackground.pipe(
+    Effect.map((pending) =>
+      pending.filter(
+        (job) =>
+          job.status === "running" &&
+          (job.recovery.kind === "shell"
+            ? job.recovery.sessionID === sessionID
+            : job.recovery.parentSessionID === sessionID),
+      ),
+    ),
+  )
+
+/**
+ * A subagent reported as done must say what it left running. Detached work answers to the
+ * subagent's own Session, so a caller told only "completed" would act on a result missing a piece.
+ */
+export function withLeftRunning(text: string, sessionID: SessionSchema.ID, running: readonly Job.Background[]) {
+  if (running.length === 0) return text
+  return [
+    text,
+    "",
+    `This subagent finished its answer but left work running in its own session (sessionID: ${sessionID}):`,
+    ...running.map((job) =>
+      job.recovery.kind === "shell"
+        ? `- shell: ${job.recovery.command}`
+        : `- subagent: ${job.recovery.description} (sessionID: ${job.recovery.childSessionID})`,
+    ),
+    "That work reports to the subagent's session, not to you. Do not treat the answer above as the whole result: continue the subagent with its sessionID to collect what is still running, or account for it in what you do next.",
+  ].join("\n")
 }
 
 export const deliver = Effect.fnUntraced(function* (

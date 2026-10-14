@@ -57,7 +57,13 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
               (message) =>
                 message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
             )
-            return SubagentCompletion.text(assistant)
+            // Read after the child has gone idle, so what is listed is what it left behind.
+            const running = yield* SubagentCompletion.leftRunning(jobs, recovery.childSessionID)
+            return SubagentCompletion.withLeftRunning(
+              SubagentCompletion.text(assistant),
+              recovery.childSessionID,
+              running,
+            )
           }),
         })
         .pipe(Effect.setContext(context)),

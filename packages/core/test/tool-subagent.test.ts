@@ -151,7 +151,7 @@ const it = testEffect(
   AppNodeBuilder.build(nodes, [...replacements, PluginSupervisor.node.replace(subagentPluginSupervisor)]),
 )
 const completionIt = testEffect(
-  AppNodeBuilder.build(LayerNode.group([nodes, SessionRestart.node, KV.node]), [
+  AppNodeBuilder.build(LayerNode.group([nodes, SessionRestart.node, KV.node, SubagentJob.node]), [
     Global.node.replace(tempGlobalLayer),
     offlineModels,
     PluginSupervisor.node.replace(subagentPluginSupervisor),
@@ -208,6 +208,72 @@ const withSubagent = (location: Location.Ref) =>
   })
 
 describe("SubagentTool", () => {
+  // AGENTS.md: a subagent reported as done must say what it left running. The child here answers and
+  // goes idle with a shell and a subagent of its own still running in the background, and one that
+  // already finished, which is not left running and is not mentioned.
+  completionIt.live("says what a completed subagent left running in its own session", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const jobs = yield* Job.Service
+          const subagents = yield* SubagentJob.Service
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const parent = yield* sessions.create({ location, model: parentModel, title: "Caller" })
+          yield* withSubagent(parent.location)
+          const child = yield* sessions.create({ parentID: parent.id, model: parentModel, title: "Child" })
+          const detach = (id: string, recovery: Job.Recovery, run: Effect.Effect<string>) =>
+            Effect.gen(function* () {
+              yield* jobs.start({ id, type: recovery.kind, title: id, metadata: {}, recovery, run })
+              yield* jobs.background(id)
+            })
+          yield* detach(
+            "shell-dev",
+            { kind: "shell", sessionID: child.id, shellID: "shell-dev", command: "bun run dev" },
+            Effect.never,
+          )
+          yield* detach(
+            "grandchild",
+            {
+              kind: "subagent",
+              parentSessionID: child.id,
+              childSessionID: Session.ID.make("ses_grandchild"),
+              agent: "reviewer",
+              description: "audit dependencies",
+            },
+            Effect.never,
+          )
+          yield* detach(
+            "shell-done",
+            { kind: "shell", sessionID: child.id, shellID: "shell-done", command: "bun test" },
+            Effect.succeed("ok"),
+          )
+          yield* jobs.wait({ id: "shell-done" })
+          yield* sessions.prompt({ sessionID: child.id, text: "work", resume: false })
+
+          yield* subagents.start({
+            kind: "subagent",
+            parentSessionID: parent.id,
+            childSessionID: child.id,
+            agent: "reviewer",
+            description: "review",
+          })
+          const output = (yield* jobs.wait({ id: child.id })).info?.output ?? ""
+
+          expect(output.startsWith(childText)).toBe(true)
+          expect(output).toContain(`left work running in its own session (sessionID: ${child.id})`)
+          expect(output).toContain("- shell: bun run dev")
+          expect(output).toContain("- subagent: audit dependencies (sessionID: ses_grandchild)")
+          expect(output).not.toContain("bun test")
+          yield* Effect.all([jobs.cancel("shell-dev"), jobs.cancel("grandchild")], { discard: true })
+        }),
+      ),
+    ),
+  )
+
   completionIt.live("admits one durable completion across live delivery and restart replay", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),
