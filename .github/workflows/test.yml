@@ -116,6 +116,15 @@ jobs:
           "$dir/$name/rg" --version
           echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
 
+      - name: Warm up PowerShell
+        # The shell tool tests give each command five seconds, and the first PowerShell start on a
+        # GitHub-hosted runner takes most of that: the first case in the file timed out on Linux twice
+        # while every later one passed. One start beforehand leaves the tests their own budget.
+        run: |
+          for shell in pwsh powershell; do
+            if command -v "$shell" >/dev/null; then "$shell" -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'; fi
+          done
+
       - name: Run unit tests
         # GitHub-hosted Windows runners take this suite well past twenty minutes: on V1 the same job
         # measured 24 to 35 on them, against upstream's faster self-hosted fleet the twenty is sized for.
