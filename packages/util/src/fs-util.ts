@@ -300,7 +300,7 @@ export namespace FSUtil {
           // resolving to the directory is it back in place — and a backup whose pair cannot be
           // confirmed is kept forever, there being no age test for backups.
           if (leftover[2] === "old") return (yield* fs.isDir(join(directory, leftover[1]))) ? target : undefined
-          const stat = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
+          const stat = yield* fs.stat(target).pipe(Effect.orElseSucceed(() => undefined))
           if (!stat) return undefined
           return Date.now() - Option.getOrElse(stat.mtime, () => new Date()).getTime() > STAGING_MAX_AGE_MS
             ? target
