@@ -3,7 +3,7 @@ import path from "path"
 import type { SessionInfo } from "@opencode/client"
 import { Project } from "@opencode/schema/project"
 import { TextAttributes, type RGBA } from "@opentui/core"
-import { useDialog } from "../ui/dialog"
+import { DIALOG_LIST_INSET, useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
 import { useData } from "../context/data"
@@ -19,7 +19,7 @@ import { Spinner } from "./spinner"
 import { errorMessage } from "../util/error"
 import { useSessionTabs } from "../context/session-tabs"
 import { useStorage } from "../context/storage"
-import { useConfig } from "../config"
+import { useConfig, useNewDesigns } from "../config"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { projectName } from "../util/project"
 import { parseSessionTitle } from "../util/session-title"
@@ -34,6 +34,7 @@ export function DialogSessionList() {
   const local = useLocal()
   const sessionTabs = useSessionTabs()
   const config = useConfig().data
+  const newDesigns = useNewDesigns()
   const toast = useToast()
   const activeLocation = useLocation()
   const [filter, setFilter] = createSignal("")
@@ -217,6 +218,10 @@ export function DialogSessionList() {
           </Show>
         </box>
       }
+      searchInTitle
+      titlePlaceholder={
+        !allProjects() && currentProjectName() ? `Search sessions in ${currentProjectName()}` : "Search sessions"
+      }
       options={options()}
       skipFilter={true}
       current={currentSessionID()}
@@ -237,14 +242,14 @@ export function DialogSessionList() {
         },
       ]}
       emptyView={
-        <box paddingLeft={4} paddingRight={4}>
+        <box paddingLeft={DIALOG_LIST_INSET} paddingRight={DIALOG_LIST_INSET}>
           <text fg={searchState().error ? theme.text.feedback.error.base : theme.text.muted}>
             {searchState().message}
           </text>
         </box>
       }
       noMatchView={
-        <box paddingLeft={4} paddingRight={4}>
+        <box paddingLeft={DIALOG_LIST_INSET} paddingRight={DIALOG_LIST_INSET}>
           <text fg={searchState().error ? theme.text.feedback.error.base : theme.text.muted}>
             {searchState().message}
           </text>
@@ -300,7 +305,7 @@ export function DialogSessionList() {
         },
       ]}
       footerHints={[
-        ...quickSwitchFooterHints(),
+        ...(newDesigns() ? [] : quickSwitchFooterHints()),
         { title: allProjects() ? "current directory" : "all projects", label: "ctrl+a", side: "right" },
       ]}
     />
