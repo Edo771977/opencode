@@ -22,13 +22,21 @@ describe("pty event order", () => {
   ptyTest("publishes created before exited when the process exits during the created publish", () =>
     Effect.gen(function* () {
       const source = yield* Bus.Service
+      const pty = yield* Pty.Service
       const seen = yield* Queue.unbounded<string>()
 
-      // Publishing an event awaits every listener, so this one holds `created` open for 50ms — long
-      // enough that a process which exits in about a millisecond, observed by bun-pty's 8ms poll,
-      // has certainly exited before the publish returns. No sleep in the test decides the outcome:
-      // it is this listener that puts the exit inside the window, by construction.
-      yield* source.listen((event) => (event.type === Pty.Event.Created.type ? Effect.sleep("50 millis") : Effect.void))
+      // Publishing an event awaits every listener, so this one holds `created` open until the session
+      // has exited: the exit lands inside the publish by construction. A fixed wait does not do that.
+      // Fifty milliseconds were enough for `/bin/true` on an idle machine, and on a loaded CI runner
+      // the process was still running when the publish returned, so the case under test never arose.
+      yield* source.listen((event) =>
+        event.type === Pty.Event.Created.type
+          ? Effect.gen(function* () {
+              while (!(yield* pty.list()).every((session) => session.status === "exited"))
+                yield* Effect.sleep("5 millis")
+            }).pipe(Effect.timeout("5 seconds"), Effect.ignore)
+          : Effect.void,
+      )
       // Registered second, so it observes the order the two publishes complete in rather than the
       // order they were started.
       yield* source.listen((event) => {
@@ -37,7 +45,6 @@ describe("pty event order", () => {
         return Effect.void
       })
 
-      const pty = yield* Pty.Service
       const info = yield* Effect.acquireRelease(pty.create({ command: "/bin/true", cwd: "/tmp" }), (created) =>
         pty.remove(created.id).pipe(Effect.ignore),
       )
