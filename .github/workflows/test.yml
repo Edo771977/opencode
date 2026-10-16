@@ -96,6 +96,26 @@ jobs:
           git config --global user.email "bot@opencode.ai"
           git config --global user.name "opencode"
 
+      - name: Install ripgrep
+        # Upstream's self-hosted runners carry ripgrep and GitHub-hosted ones do not. Without it the
+        # search tests try to download it, which the test harness refuses. The version is the one
+        # packages/core/src/ripgrep/binary.ts pins.
+        run: |
+          if command -v rg >/dev/null; then rg --version; exit 0; fi
+          version=15.1.0
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            name="ripgrep-$version-x86_64-pc-windows-msvc"
+            archive="$name.zip"
+          else
+            name="ripgrep-$version-x86_64-unknown-linux-musl"
+            archive="$name.tar.gz"
+          fi
+          dir="$(cd "$RUNNER_TEMP" && pwd)"
+          curl -fsSL --retry 3 -o "$dir/$archive" "https://github.com/BurntSushi/ripgrep/releases/download/$version/$archive"
+          if [ "$RUNNER_OS" = "Windows" ]; then unzip -q "$dir/$archive" -d "$dir"; else tar -xzf "$dir/$archive" -C "$dir"; fi
+          "$dir/$name/rg" --version
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
       - name: Run unit tests
         # GitHub-hosted Windows runners take this suite well past twenty minutes: on V1 the same job
         # measured 24 to 35 on them, against upstream's faster self-hosted fleet the twenty is sized for.
