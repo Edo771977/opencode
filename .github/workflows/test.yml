@@ -135,11 +135,14 @@ jobs:
           # Bun's five-second default: a different one each run (util's global import, app's Playwright
           # config), always while other packages were starting. There the packages run one at a time.
           concurrency=${{ runner.os == 'Windows' && 1 || 3 }}
+          # One failing package must not stop the others: on hosted runners a single timing-sensitive
+          # upstream test fails now and then, and stopping there hid every result after it. The job
+          # still fails; it now shows every failure of the run at once.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            GITHUB_ACTIONS=false bun turbo test --concurrency=$concurrency
+            GITHUB_ACTIONS=false bun turbo test --concurrency=$concurrency --continue=dependencies-successful
             exit 0
           fi
-          GITHUB_ACTIONS=false bun turbo test --affected --concurrency=$concurrency
+          GITHUB_ACTIONS=false bun turbo test --affected --concurrency=$concurrency --continue=dependencies-successful
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
           TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
