@@ -125,6 +125,15 @@ jobs:
             if command -v "$shell" >/dev/null; then "$shell" -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'; fi
           done
 
+      - name: Warm up the Playwright config
+        # app's `Playwright uses <mode>` tests each start a child `bun` that imports
+        # playwright.config.ts within Bun's five-second default. On GitHub-hosted Windows the first
+        # import of that graph took longer than that in two runs out of five, while the cases after
+        # it, with the transpiler cache warm, passed. One import beforehand warms it for them.
+        if: runner.os == 'Windows'
+        working-directory: packages/app
+        run: bun -e 'import config from "./playwright.config.ts"; console.log(Object.keys(config).join(" "))'
+
       - name: Run unit tests
         # GitHub-hosted Windows runners take this suite well past twenty minutes: on V1 the same job
         # measured 24 to 35 on them, against upstream's faster self-hosted fleet the twenty is sized for.
