@@ -5712,6 +5712,7 @@ export type MessageListInput = {
       | "shell"
       | "assistant"
       | "compaction"
+      | "idle"
       | undefined
   }["limit"]
   readonly order?: {
@@ -5729,6 +5730,7 @@ export type MessageListInput = {
       | "shell"
       | "assistant"
       | "compaction"
+      | "idle"
       | undefined
   }["order"]
   readonly cursor?: {
@@ -5746,6 +5748,7 @@ export type MessageListInput = {
       | "shell"
       | "assistant"
       | "compaction"
+      | "idle"
       | undefined
   }["cursor"]
   readonly type?: {
@@ -5763,6 +5766,7 @@ export type MessageListInput = {
       | "shell"
       | "assistant"
       | "compaction"
+      | "idle"
       | undefined
   }["type"]
 }
