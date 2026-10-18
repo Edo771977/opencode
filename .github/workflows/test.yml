@@ -134,6 +134,18 @@ jobs:
         working-directory: packages/app
         run: bun -e 'import config from "./playwright.config.ts"; console.log(Object.keys(config).join(" "))'
 
+      - name: Warm up PowerShell inside a PTY
+        # core's `detached PTY hosts ...` tests wait five seconds for PowerShell's prompt inside a
+        # PTY. On GitHub-hosted Windows that first start inside a pseudo console missed it in two runs
+        # out of three, after the plain PowerShell warm-up above, which does not go through one. One
+        # pass of the test's own fixture beforehand warms that path. It only warms, so a failure here
+        # does not fail the job; the tests still decide.
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        continue-on-error: true
+        working-directory: packages/core
+        run: bun test/fixture/pty-windows.ts interrupt
+
       - name: Run unit tests
         # GitHub-hosted Windows runners take this suite well past twenty minutes: on V1 the same job
         # measured 24 to 35 on them, against upstream's faster self-hosted fleet the twenty is sized for.
