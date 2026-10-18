@@ -144,7 +144,7 @@ jobs:
         timeout-minutes: 2
         continue-on-error: true
         working-directory: packages/core
-        run: bun test/fixture/pty-windows.ts interrupt
+        run: bun test/fixture/pty-windows.ts interrupt 2>&1 | tee "$(cd "$RUNNER_TEMP" && pwd)/pty-warmup.log"
 
       - name: Run unit tests
         # GitHub-hosted Windows runners take this suite well past twenty minutes: on V1 the same job
@@ -156,18 +156,40 @@ jobs:
           # Bun's five-second default: a different one each run (util's global import, app's Playwright
           # config), always while other packages were starting. There the packages run one at a time.
           concurrency=${{ runner.os == 'Windows' && 1 || 3 }}
+          # A copy of the output for the failure summary below.
+          log="$(cd "$RUNNER_TEMP" && pwd)/unit-tests.log"
           # One failing package must not stop the others: on hosted runners a single timing-sensitive
           # upstream test fails now and then, and stopping there hid every result after it. The job
           # still fails; it now shows every failure of the run at once.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            GITHUB_ACTIONS=false bun turbo test --concurrency=$concurrency --continue=dependencies-successful
+            GITHUB_ACTIONS=false bun turbo test --concurrency=$concurrency --continue=dependencies-successful 2>&1 | tee "$log"
             exit 0
           fi
-          GITHUB_ACTIONS=false bun turbo test --affected --concurrency=$concurrency --continue=dependencies-successful
+          GITHUB_ACTIONS=false bun turbo test --affected --concurrency=$concurrency --continue=dependencies-successful 2>&1 | tee "$log"
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
           TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('{0}^1', github.sha) || github.event.before }}
           TURBO_SCM_HEAD: ${{ github.sha }}
+
+      - name: Summarize test failures
+        # The full suite prints thousands of lines and a failure lands wherever its package ran, often
+        # beyond what a reader of the log tail sees. This repeats every failure with the lines before
+        # it, the unhandled errors, each package's counts and the PTY warm-up's own output at the end.
+        if: failure()
+        run: |
+          dir="$(cd "$RUNNER_TEMP" && pwd)"
+          if [ -f "$dir/pty-warmup.log" ]; then
+            echo "== PTY warm-up output"
+            cat "$dir/pty-warmup.log"
+          fi
+          [ -f "$dir/unit-tests.log" ] || exit 0
+          sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$dir/unit-tests.log" > "$dir/unit-tests.plain.log"
+          echo "== failing tests"
+          grep -n -B12 '(fail) ' "$dir/unit-tests.plain.log" || echo "none"
+          echo "== unhandled errors"
+          grep -n -A15 'Unhandled error' "$dir/unit-tests.plain.log" || echo "none"
+          echo "== counts"
+          grep -n -E '^ *[0-9]+ (pass|fail|skip|error)$|^Ran [0-9]+ tests|Tasks: |Failed: ' "$dir/unit-tests.plain.log" || true
 
       - name: Verify published codemode package
         if: runner.os == 'Linux'
