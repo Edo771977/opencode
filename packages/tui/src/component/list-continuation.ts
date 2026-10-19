@@ -1,5 +1,3 @@
-import { stringWidth } from "../util/string-width"
-
 /**
  * Hook for automatic list continuation in textarea inputs.
  *
@@ -271,20 +269,4 @@ export function applyListAction(text: string, cursor: number, action: ListContin
   const start = action.renumber.start + action.insertText.length
   const end = action.renumber.end + action.insertText.length
   return { text: inserted.slice(0, start) + action.renumber.newText + inserted.slice(end), cursor: next }
-}
-
-/**
- * The string index a textarea cursor sits at. The textarea counts its offset in display columns, so a
- * wide character before the cursor would otherwise put list markers in the wrong place.
- */
-export function indexAtColumn(text: string, column: number) {
-  const segments = [...new Intl.Segmenter().segment(text)]
-  const reached = segments.reduce(
-    (state, part) =>
-      state.width >= column
-        ? state
-        : { width: state.width + stringWidth(part.segment), index: part.index + part.segment.length },
-    { width: 0, index: 0 },
-  )
-  return reached.index
 }

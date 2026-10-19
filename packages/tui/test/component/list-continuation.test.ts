@@ -6,7 +6,6 @@ import {
   handleNewline,
   cleanupForSubmit,
   applyListAction,
-  indexAtColumn,
 } from "../../src/component/list-continuation"
 
 describe("list-continuation", () => {
@@ -346,14 +345,5 @@ describe("applyListAction", () => {
 
   test("takes the marker and its newline on backspace", () => {
     expect(press({ text: "1. foo\n2", cursor: 8 }, handleBackspace)).toEqual({ text: "1. foo", cursor: 6 })
-  })
-})
-
-describe("indexAtColumn", () => {
-  test("maps a display column to the string index under it", () => {
-    expect(indexAtColumn("1. abc", 6)).toBe(6)
-    // A wide character takes two columns and one index.
-    expect(indexAtColumn("1. 漢字", 7)).toBe(5)
-    expect(indexAtColumn("1. 漢字", 5)).toBe(4)
   })
 })

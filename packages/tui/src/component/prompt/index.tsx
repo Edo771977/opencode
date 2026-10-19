@@ -29,8 +29,8 @@ import { normalizePromptContent, openEditor } from "../../editor"
 import { useExit } from "../../context/exit"
 import { expandPromptInputPastedText, realignPromptInputMentions } from "../../prompt/mention"
 import { parseSlashHead } from "../../prompt/parse"
-import { stringWidth } from "../../util/string-width"
-import { applyListAction, cleanupForSubmit, handleBackspace, handleNewline, indexAtColumn } from "../list-continuation"
+import { promptOffsetIndex } from "../../prompt/display"
+import { applyListAction, cleanupForSubmit, handleBackspace, handleNewline } from "../list-continuation"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
 import { saveDraft, takeDraft } from "./draft-stash"
@@ -1101,12 +1101,12 @@ export function Prompt(props: PromptProps) {
   const editList = (compute: typeof handleNewline) => {
     if (!listEditable()) return false
     const text = input.plainText
-    const cursor = indexAtColumn(text, input.cursorOffset)
+    const cursor = promptOffsetIndex(text, input.cursorOffset, renderer.widthMethod)
     const action = compute(text, cursor)
     if (!action) return false
     const next = applyListAction(text, cursor, action)
     input.setText(next.text)
-    input.cursorOffset = stringWidth(next.text.slice(0, next.cursor))
+    input.cursorOffset = measure(next.text.slice(0, next.cursor))
     setStore("prompt", "text", next.text)
   }
 
