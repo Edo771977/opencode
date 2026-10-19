@@ -183,13 +183,20 @@ jobs:
             cat "$dir/pty-warmup.log"
           fi
           [ -f "$dir/unit-tests.log" ] || exit 0
-          sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$dir/unit-tests.log" > "$dir/unit-tests.plain.log"
+          sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\r$//' "$dir/unit-tests.log" > "$dir/unit-tests.plain.log"
           echo "== failing tests"
           grep -n -B12 '(fail) ' "$dir/unit-tests.plain.log" || echo "none"
           echo "== unhandled errors"
           grep -n -A15 'Unhandled error' "$dir/unit-tests.plain.log" || echo "none"
           echo "== counts"
           grep -n -E '^ *[0-9]+ (pass|fail|skip|error)$|^Ran [0-9]+ tests|Tasks: |Failed: ' "$dir/unit-tests.plain.log" || true
+          # A task that dies before bun prints a result leaves no (fail) line to find, so show how each
+          # failed task's own output ends.
+          for task in $(grep -h '^Failed: ' "$dir/unit-tests.plain.log" | sed 's/^Failed: *//; s/,/ /g'); do
+            echo "== end of ${task/\#/:}"
+            # Actions shows turbo's ::group:: markers as ##[group], so accept both spellings.
+            awk -v name="${task/\#/:}" '$0 == "::group::" name || $0 == "##[group]" name { on = 1; next } on && /^(::endgroup::|##\[endgroup\])/ { on = 0 } on' "$dir/unit-tests.plain.log" | tail -n 80
+          done
 
       - name: Verify published codemode package
         if: runner.os == 'Linux'
