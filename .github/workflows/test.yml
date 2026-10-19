@@ -194,8 +194,11 @@ jobs:
           # failed task's own output ends.
           for task in $(grep -h '^Failed: ' "$dir/unit-tests.plain.log" | sed 's/^Failed: *//; s/,/ /g'); do
             echo "== end of ${task/\#/:}"
-            # Actions shows turbo's ::group:: markers as ##[group], so accept both spellings.
-            awk -v name="${task/\#/:}" '$0 == "::group::" name || $0 == "##[group]" name { on = 1; next } on && /^(::endgroup::|##\[endgroup\])/ { on = 0 } on' "$dir/unit-tests.plain.log" | tail -n 80
+            # Actions shows turbo's ::group:: markers as ##[group]; match either, wherever the name sits.
+            out=$(awk -v name="${task/\#/:}" '/(::|##\[)group(::|\])/ { on = index($0, name) > 0; next } /(::|##\[)endgroup(::|\])/ { on = 0 } on' "$dir/unit-tests.plain.log" | tail -n 80)
+            # Without a group, the lines before turbo's own warning for the task are its output.
+            [ -n "$out" ] || out=$(grep -F -B80 "$task:  WARNING" "$dir/unit-tests.plain.log" || true)
+            echo "$out"
           done
 
       - name: Verify published codemode package
