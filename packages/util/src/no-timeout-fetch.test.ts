@@ -7,7 +7,10 @@ const server = Bun.serve({
   fetch: async (request) => {
     if (new URL(request.url).pathname === "/hang") {
       pending.resolve()
-      return new Promise<Response>(() => {})
+      // Settle once the client aborts, so no handler is left pending when the server stops.
+      return new Promise<Response>((resolve) =>
+        request.signal.addEventListener("abort", () => resolve(new Response(null))),
+      )
     }
     return Response.json({ method: request.method, header: request.headers.get("x-test"), body: await request.text() })
   },
