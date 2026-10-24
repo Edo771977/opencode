@@ -236,6 +236,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     systemRemoved: false,
     systemUnavailable: false,
     systemLoadHook: Effect.void,
+    activationHook: Effect.void,
     skillBaselines: new Map<Agent.ID, string>(),
     authorizations: new Array<Tool.Context>(),
     executions: new Array<string>(),
@@ -462,7 +463,7 @@ const layer = Layer.unwrap(
       ),
       Config.node.replace(config),
       PluginSupervisor.node.replace(Layer.empty),
-      Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
+      Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.suspend(() => state.activationHook) })),
       SessionModelTransport.node.replace(modelTransport),
     ]
     const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
@@ -2703,6 +2704,26 @@ describe("SessionRunnerLLM", () => {
       )
     }
   }
+
+  scenario("waits for plugin activation before each step and tool call", function* (s) {
+    const waits: Array<[number, number]> = []
+    s.activationHook = Effect.sync(() => {
+      waits.push([s.requests.length, s.executions.length])
+    })
+    yield* s.llm.push(
+      TestLLM.tool("call-activation", "echo", { text: "echo" }),
+      TestLLM.text("Done", "text-after-activation"),
+    )
+    yield* s.runPrompt("Question")
+
+    // Model requests and tool executions seen at each wait: drain entry, step 1, the tool call, step 2.
+    expect(waits).toEqual([
+      [0, 0],
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ])
+  })
 
   scenario("restarts compaction drafts after transient failures and unsuccessful finishes", function* (s) {
     yield* s.llm.push(TestLLM.text("Earlier answer", "text-manual-failure-history"))

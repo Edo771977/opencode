@@ -206,6 +206,47 @@ describe("provider error classification", () => {
     ).toBe("ContentPolicy")
   })
 
+  test("classifies Alibaba Model Studio data inspection failures", () => {
+    const alibaba = {
+      request_id: "1537ecc9-6873-93f7-9865-6fe4eb1d7851",
+      code: "DataInspectionFailed",
+      message: "Green net check failed for text (input): Input data may contain inappropriate content.",
+    }
+
+    expect(
+      classifyProviderFailure({ message: alibaba.message, status: 400, rawBody: JSON.stringify(alibaba) })._tag,
+    ).toBe("ContentPolicy")
+  })
+
+  test("classifies OpenAI image moderation blocks directly and through the Vercel AI Gateway", () => {
+    const message =
+      "Your request was rejected by the safety system. If you believe this is an error, contact us at help.openai.com and include the request ID req_123."
+    const openai = {
+      error: {
+        message,
+        type: "image_generation_user_error",
+        param: null,
+        code: "moderation_blocked",
+        moderation_details: { moderation_stage: "input", categories: ["other"] },
+      },
+    }
+    // The gateway keeps OpenAI's message but replaces its type and drops the code.
+    const vercel = {
+      error: {
+        message,
+        type: "AI_APICallError",
+        param: { error: message, statusCode: 400, name: "AI_APICallError", message, isRetryable: false },
+      },
+    }
+
+    expect(
+      [openai, vercel].map(
+        (body) =>
+          classifyProviderFailure({ message: body.error.message, status: 400, rawBody: JSON.stringify(body) })._tag,
+      ),
+    ).toEqual(["ContentPolicy", "ContentPolicy"])
+  })
+
   test("recovers policy codes that OpenCode Zen preserves only in its message label", () => {
     // Zen drops upstream codes outside its allow-list and replaces the type, but
     // `Protocol.errorMessage` keeps the original code as a `[code]` prefix.
