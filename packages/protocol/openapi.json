@@ -14169,6 +14169,17 @@
             "type": "integer",
             "exclusiveMinimum": 0
           },
+          "small": {
+            "type": "boolean"
+          },
+          "budget": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "budget_stop": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
           }
@@ -14304,6 +14315,17 @@
           },
           "steps": {
             "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "small": {
+            "type": "boolean"
+          },
+          "budget": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "budget_stop": {
+            "type": "number",
             "exclusiveMinimum": 0
           },
           "disabled": {
