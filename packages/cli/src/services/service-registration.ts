@@ -1,6 +1,7 @@
 export * as ServiceRegistration from "./service-registration"
 
 import { Service, type Info } from "@opencode/client/effect/service"
+import { FSUtil } from "@opencode/util/fs-util"
 import path from "node:path"
 import { Effect, FileSystem, Schedule, Schema } from "effect"
 import { HttpServer } from "effect/http"
@@ -36,7 +37,10 @@ export const register = Effect.fnUntraced(function* (options: {
     found.url === info.url &&
     found.pid === info.pid &&
     found.password === info.password
-  yield* fs.writeFileString(temp, encoded, { mode: 0o600 }).pipe(Effect.andThen(fs.rename(temp, options.file)))
+  // A contender reading the registration holds it open, and Windows refuses to replace an open file until it lets go.
+  yield* fs
+    .writeFileString(temp, encoded, { mode: 0o600 })
+    .pipe(Effect.andThen(FSUtil.retryWhileHeld(fs.rename(temp, options.file))))
   yield* current.pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("managed service registration check failed; shutting down", {
