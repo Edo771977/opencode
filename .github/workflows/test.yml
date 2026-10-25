@@ -5,6 +5,7 @@ on:
     branches:
       - dev
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -23,6 +24,7 @@ env:
 jobs:
   affected:
     name: affected packages
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     outputs:
       e2e: ${{ steps.packages.outputs.app }}
@@ -55,6 +57,7 @@ jobs:
 
   unit:
     name: unit (${{ matrix.settings.name }})
+    if: ${{ !github.event.pull_request.draft }}
     strategy:
       fail-fast: false
       matrix:
@@ -231,6 +234,7 @@ jobs:
 
   build:
     name: build (${{ matrix.settings.name }})
+    if: ${{ !github.event.pull_request.draft }}
     strategy:
       fail-fast: false
       matrix:
@@ -409,7 +413,7 @@ jobs:
   e2e:
     name: e2e (${{ matrix.os }})
     needs: [affected, e2e-suite]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft }}
     strategy:
       fail-fast: false
       matrix:
