@@ -210,10 +210,10 @@ jobs:
             echo "$out"
           done
 
-      - name: Verify published codemode package
+      - name: Verify packed codemode package
         if: runner.os == 'Linux'
         working-directory: packages/codemode
-        run: bun run script/publish.ts --dry-run
+        run: bun run pack
 
       - name: Verify packed workerd SDK
         if: runner.os == 'Linux'
