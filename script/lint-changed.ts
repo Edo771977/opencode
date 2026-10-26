@@ -12,7 +12,15 @@ type Diagnostic = {
 }
 
 const base = await resolveBase(process.argv[2] ?? process.env.LINT_BASE)
-const tracked = (await $`git diff --name-only --diff-filter=ACMR ${base}`.text()).split("\n")
+// A fork merging upstream sets LINT_UPSTREAM to upstream's head: a file that matches it is upstream's code, not the fork's
+// change, even though the merge adds or edits it.
+const upstream = process.env.LINT_UPSTREAM
+const own = upstream
+  ? new Set((await $`git diff --name-only --diff-filter=ACMR ${upstream}`.text()).split("\n"))
+  : undefined
+const tracked = (await $`git diff --name-only --diff-filter=ACMR ${base}`.text())
+  .split("\n")
+  .filter((file) => own?.has(file) ?? true)
 const untracked = (await $`git ls-files --others --exclude-standard`.text()).split("\n")
 // The packages .oxlintrc.json applies the anti-slop rules to.
 const packages = ["packages/app/", "packages/desktop/", "packages/gui-extensions/", "packages/ui/", "packages/session-ui/"]

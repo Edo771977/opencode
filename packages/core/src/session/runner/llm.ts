@@ -300,18 +300,30 @@ const layer = Layer.effect(
           initial: loaded.initial,
           messages: loaded.messages,
         })
-        const prepared = yield* context.request.primary({
-          session: loaded.session,
-          agent: loaded.agent.id,
-          model: loaded.model,
-          tools: loaded.tools,
-          system: transcript.system,
-          messages: ending ? [...transcript.messages, Message.assistant(ending)] : transcript.messages,
-          // Keep tool definitions on the final Step to preserve the provider's cached prefix.
-          toolChoice: ending ? "none" : undefined,
-          webSocket: "session",
-          inputTokens: SessionCompaction.estimatePrompt(loaded),
-        })
+        const prepared = yield* context.request
+          .primary({
+            session: loaded.session,
+            agent: loaded.agent.id,
+            model: loaded.model,
+            tools: loaded.tools,
+            system: transcript.system,
+            messages: ending ? [...transcript.messages, Message.assistant(ending)] : transcript.messages,
+            // Keep tool definitions on the final Step to preserve the provider's cached prefix.
+            toolChoice: ending ? "none" : undefined,
+            webSocket: "session",
+            inputTokens: SessionCompaction.estimatePrompt(loaded),
+          })
+          .pipe(
+            // The hook event holds every message from before images are bounded, screenshots included, and is a separate
+            // copy once a plugin hook has rewritten it. The step and its tool callbacks live as long as the slowest tool,
+            // so they keep only what they use.
+            Effect.map((prepared) => ({
+              request: prepared.request,
+              options: prepared.options,
+              retry: prepared.retry,
+              executeTool: prepared.executeTool,
+            })),
+          )
         const outcome = yield* steps.attempt({
           isLocationClosed: lifecycle.isClosed,
           sessionID,
