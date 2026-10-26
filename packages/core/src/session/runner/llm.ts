@@ -284,13 +284,14 @@ const layer = Layer.effect(
                 Effect.flatMap((selection) => context.load(selection, { small: true })),
               )
             : selected
-        const compacted = yield* compaction.compact({ reason: "auto", context: loaded })
+        const estimate = SessionCompaction.estimatePrompt(loaded)
+        const compacted = yield* compaction.compact({ reason: "auto", context: loaded, estimate })
         if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
         if (compacted.status === "completed") {
           assistantMessageID = SessionMessage.ID.create()
           continue
         }
-        yield* compaction.precompute(Effect.succeed(loaded))
+        yield* compaction.precompute(Effect.succeed(loaded), estimate)
         // Both endings are one step without tools that summarizes what was done and what is left.
         const ending = budget.type === "end" ? budget.prompt : stepLimitReached ? MAX_STEPS_PROMPT : undefined
         const transcript = SessionModelRequest.baseTranscript({
@@ -311,7 +312,7 @@ const layer = Layer.effect(
             // Keep tool definitions on the final Step to preserve the provider's cached prefix.
             toolChoice: ending ? "none" : undefined,
             webSocket: "session",
-            inputTokens: SessionCompaction.estimatePrompt(loaded),
+            inputTokens: estimate,
           })
           .pipe(
             // The hook event holds every message from before images are bounded, screenshots included, and is a separate
@@ -348,7 +349,7 @@ const layer = Layer.effect(
           recoverOverflow: Effect.suspend(() =>
             recoverOverflow
               ? compaction
-                  .compact({ reason: "overflow", context: loaded })
+                  .compact({ reason: "overflow", context: loaded, estimate })
                   .pipe(Effect.map((result) => result.status === "completed"))
               : Effect.succeed(false),
           ),

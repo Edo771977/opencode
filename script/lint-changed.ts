@@ -18,12 +18,19 @@ const upstream = process.env.LINT_UPSTREAM
 const own = upstream
   ? new Set((await $`git diff --name-only --diff-filter=ACMR ${upstream}`.text()).split("\n"))
   : undefined
-const tracked = (await $`git diff --name-only --diff-filter=ACMR ${base}`.text())
+// -M100% reports only exact moves as renames, so a moved file is linted only once its content changes.
+const tracked = (await $`git diff --name-only -M100% --diff-filter=ACM ${base}`.text())
   .split("\n")
   .filter((file) => own?.has(file) ?? true)
 const untracked = (await $`git ls-files --others --exclude-standard`.text()).split("\n")
 // The packages .oxlintrc.json applies the anti-slop rules to.
-const packages = ["packages/app/", "packages/desktop/", "packages/gui-extensions/", "packages/ui/", "packages/session-ui/"]
+const packages = [
+  "packages/app/",
+  "packages/desktop/",
+  "packages/gui-extensions/",
+  "packages/ui/",
+  "packages/session-ui/",
+]
 // oxlint skips declaration files and prints a non-JSON message when given only those.
 const files = [...new Set([...tracked, ...untracked])].filter(
   (file) =>
