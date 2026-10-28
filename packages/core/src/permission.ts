@@ -98,6 +98,8 @@ export interface Interface {
   readonly assert: (input: AssertInput) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
   /** What `assert` would do with this input, without asking. */
   readonly evaluate: (input: AssertInput) => Effect.Effect<Permission.Effect, SessionErrors.NotFoundError>
+  /** Fails only when the rules deny the request; never asks the user. */
+  readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly get: (id: ID) => Effect.Effect<Request | undefined>
   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
@@ -266,6 +268,17 @@ const layer = Layer.effect(
       }),
     )
 
+    const assertNotDenied = Effect.fn("Permission.assertNotDenied")(function* (input: AssertInput) {
+      const result = yield* evaluateInput(input)
+      if (result.effect !== "deny") return
+      return yield* new BlockedError({
+        rules: relevant(input, result.rules),
+        permission: input.action,
+        resources: input.resources,
+        reason: result.message,
+      })
+    })
+
     const reply = Effect.fn("Permission.reply")((input: ReplyInput) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
@@ -345,7 +358,17 @@ const layer = Layer.effect(
       return (yield* evaluateInput(input)).effect
     })
 
-    return Service.of({ ask, assert, evaluate: evaluatePermission, reply, get, forSession, list, close })
+    return Service.of({
+      ask,
+      assert,
+      assertNotDenied,
+      evaluate: evaluatePermission,
+      reply,
+      get,
+      forSession,
+      list,
+      close,
+    })
   }),
 )
 
