@@ -30,9 +30,9 @@ export const leftRunning = (jobs: Pick<Job.Interface, "pendingBackground">, sess
       pending.filter(
         (job) =>
           job.status === "running" &&
-          (job.recovery.kind === "shell"
-            ? job.recovery.sessionID === sessionID
-            : job.recovery.parentSessionID === sessionID),
+          (job.recovery.kind === "subagent"
+            ? job.recovery.parentSessionID === sessionID
+            : job.recovery.sessionID === sessionID),
       ),
     ),
   )
@@ -47,11 +47,11 @@ export function withLeftRunning(text: string, sessionID: SessionSchema.ID, runni
     text,
     "",
     `${LEFT_RUNNING} (sessionID: ${sessionID}):`,
-    ...running.map((job) =>
-      job.recovery.kind === "shell"
-        ? `- shell: ${job.recovery.command}`
-        : `- subagent: ${job.recovery.description} (sessionID: ${job.recovery.childSessionID})`,
-    ),
+    ...running.map((job) => {
+      if (job.recovery.kind === "shell") return `- shell: ${job.recovery.command}`
+      if (job.recovery.kind === "image") return `- image: ${job.recovery.path} (${job.recovery.model})`
+      return `- subagent: ${job.recovery.description} (sessionID: ${job.recovery.childSessionID})`
+    }),
     "That work reports to the subagent's session, not to you. Do not treat the answer above as the whole result: continue the subagent with its sessionID to collect what is still running, or account for it in what you do next.",
   ].join("\n")
 }
