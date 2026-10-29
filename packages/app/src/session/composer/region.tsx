@@ -51,6 +51,7 @@ import { createSessionRequestModel } from "../requests/model"
 import type { Region } from "@/runtime/plugin/panels"
 import { SessionLocationMissing } from "./location-missing"
 import { SessionPluginPills } from "./plugin-pills"
+import { createTimelineActions, type TimelineActionsView, type TimelinePendingActions } from "./timeline-actions"
 import type { MountedSession, SessionScreen } from "@opencode/plugin/gui"
 
 export function createActiveSessionRegion(input: {
@@ -272,12 +273,8 @@ export function createActiveSessionRegion(input: {
     showToast({ title: language.t("common.requestFailed") })
   }
 
-  const pendingSteer: NonNullable<SessionUserActions["pending"]> = {
-    status: (messageID) => {
-      const sessionID = input.session.identity.params.id
-
-      return sessionID ? data.session.pending.status(sessionID, messageID) : undefined
-    },
+  const pendingSteer: TimelinePendingActions = {
+    status: (sessionID, messageID) => data.session.pending.status(sessionID, messageID),
     queue: ({ sessionID, messageID }) =>
       server.api.session.inbox
         .update({ sessionID, inboxID: messageID, delivery: "queue" })
@@ -375,29 +372,15 @@ export function createActiveSessionRegion(input: {
       focus: focusPrompt,
     },
     actions: {
-      timeline: {
-        get revert() {
-          if (input.session.data.isChild()) return
-
-          return revertMessage
-        },
-        get fork() {
-          if (input.session.data.isChild()) return
-
-          return forkMessage
-        },
-        get pending() {
-          if (input.session.data.isChild()) return
-
-          return pendingSteer
-        },
-        get chooseModel() {
-          if (input.session.data.isChild()) return
-
-          return () => command.trigger("model.choose")
-        },
-        openAttachment,
-      } satisfies SessionUserActions,
+      // Each timeline passes its own session and child flag, which a kept timeline holds while another is routed.
+      timeline: (view: TimelineActionsView) =>
+        createTimelineActions(view, {
+          revert: revertMessage,
+          fork: forkMessage,
+          pending: pendingSteer,
+          chooseModel: () => command.trigger("model.choose"),
+          openAttachment,
+        }),
     },
     requests: state,
   }
