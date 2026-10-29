@@ -659,7 +659,7 @@ function policies(value: unknown, path: string[], diagnostics: Diagnostic[]) {
     invalid(path, diagnostics)
     return []
   }
-  const known = Schema.is(ConfigPolicy.Info.fields.action)
+  const known = Schema.is(ConfigPolicy.Action)
   return value.flatMap((item, index) => {
     const entry = [...path, String(index)]
     const policy = decodeQuietly(ConfigPolicy.Info, item)
