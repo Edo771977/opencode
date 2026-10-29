@@ -41,10 +41,12 @@ jobs:
         # Against the merge's first parent, so base-branch commits the pull request has not merged are not counted as its
         # changes (the event's base SHA can predate them).
         # On the fork, a file still identical to upstream's is upstream's code, so an upstream sync is not held to linting
-        # all of it; the fork's own changes still are.
+        # all of it; the fork's own changes still are. Upstream is taken at the last commit the pull request merges, not
+        # at its current head, which may have changed the same files since.
         run: |
           if [ "${{ github.repository }}" != "anomalyco/opencode" ]; then
-            git fetch --no-tags --depth=1 https://github.com/anomalyco/opencode.git dev
-            export LINT_UPSTREAM=FETCH_HEAD
+            git fetch --no-tags --deepen=200 origin "${{ github.sha }}"
+            git fetch --no-tags --depth=500 https://github.com/anomalyco/opencode.git dev
+            export LINT_UPSTREAM=$(git merge-base HEAD FETCH_HEAD || git rev-parse FETCH_HEAD)
           fi
           bun run lint:changed HEAD^1
