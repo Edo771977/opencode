@@ -98,6 +98,7 @@ type MessageTimelineProps = {
   setRevealMessage?: (fn: (id: string, partID?: string) => void) => void
   setRevealPart?: (fn: (target: string) => boolean) => void
   setScrollToEnd?: (fn: (behavior?: ScrollBehavior) => void) => void
+  setPage?: (fn: (direction: 1 | -1) => void) => void
   reveal?: { target: () => string | undefined; done: () => void }
   search?: JSX.Element
 }
@@ -252,6 +253,7 @@ function MessageTimelineView(
     setRevealMessage: props.setRevealMessage,
     setRevealPart: props.setRevealPart,
     setScrollToEnd: props.setScrollToEnd,
+    setPage: props.setPage,
     reveal: props.reveal,
   })
 
@@ -546,7 +548,7 @@ function MessageTimelineView(
                   </Show>
                 </>
               }
-              actions={
+              actions={(fit) => (
                 <Show when={sessionID()} keyed>
                   {(_id) => (
                     <>
@@ -563,13 +565,16 @@ function MessageTimelineView(
                           get active() {
                             return props.active !== false
                           },
+                          get compact() {
+                            return fit.compact
+                          },
                         }}
                       />
                       <SessionHeaderSpacer visible={props.reserveReviewToggle} />
                     </>
                   )}
                 </Show>
-              }
+              )}
             >
               <Show when={parentID() && childTitle()}>
                 {(value) => (

@@ -33,7 +33,7 @@ import { promptOffsetIndex } from "../../prompt/display"
 import { applyListAction, cleanupForSubmit, handleBackspace, handleNewline } from "../list-continuation"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
-import { saveDraft, takeDraft } from "./draft-stash"
+import { registerComposer, saveDraft, takeDraft } from "./draft-stash"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
@@ -719,6 +719,7 @@ export function Prompt(props: PromptProps) {
   const stashSessionID = props.sessionID
 
   onMount(() => {
+    onCleanup(registerComposer(stashSessionID, ref))
     const saved = takeDraft(stashSessionID)
     if (store.prompt.text) return
     if (saved && saved.prompt.text) {
