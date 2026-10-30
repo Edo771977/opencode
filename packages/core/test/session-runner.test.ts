@@ -7393,7 +7393,7 @@ describe("an agent with a budget", () => {
     yield* configure({ budget: 1 })
     yield* s.llm.push(costly("First", "first"))
     yield* s.runPrompt("One")
-    yield* s.llm.push(TestLLM.tool("call-echo", "echo", { text: "work" }), TestLLM.text("Done", "done"))
+    yield* s.llm.push(TestLLM.toolCall("call-echo", "echo", { text: "work" }), TestLLM.text("Done", "done"))
     yield* s.runPrompt("Two")
 
     expect(s.budgetQuestions).toHaveLength(1)
