@@ -28,6 +28,7 @@ const permission = Layer.succeed(
     },
     evaluate: () => Effect.succeed("allow"),
     assertNotDenied: () => Effect.void,
+    allows: () => Effect.succeed(false),
     reply: () => Effect.void,
     get: () => Effect.succeed(undefined),
     forSession: () => Effect.succeed([]),
