@@ -265,12 +265,12 @@ export namespace FSUtil {
 
   export const sweepStale = (fs: Interface, directory: string) =>
     Effect.gen(function* () {
-      const entries = yield* fs.readDirectoryEntries(directory).pipe(Effect.orElseSucceed(() => [] as DirEntry[]))
+      const entries = yield* fs.readDirectoryEntries(directory).pipe(Effect.orElseSucceed(() => []))
       const collectable = yield* Effect.forEach(entries, (entry) =>
         Effect.gen(function* () {
           // A swap only ever moves directories, so anything else wearing the shape was put there by
           // something other than a swap and is not ours to delete.
-          if (entry.type !== "directory") return undefined
+          if (entry.type !== "Directory") return undefined
           const leftover = LEFTOVER.exec(entry.name)
           if (!leftover) return undefined
           const target = join(directory, entry.name)
