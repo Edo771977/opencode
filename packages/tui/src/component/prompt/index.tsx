@@ -50,7 +50,7 @@ import { useConnected } from "../use-connected"
 import { useToast } from "../../ui/toast"
 import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
-import { useConfig } from "../../config"
+import { useConfig, useCursorStyle } from "../../config"
 import { usePromptMove } from "./move"
 import { promptFilesForServer, resolvePastedAttachments } from "./local-attachment"
 import { locationKey, useData } from "../../context/data"
@@ -209,6 +209,7 @@ export function Prompt(props: PromptProps) {
   const currentLocation = useLocation()
   const args = useArgs()
   const config = useConfig().data
+  const cursorStyle = useCursorStyle()
   const dialog = useDialog()
   const toast = useToast()
   const status = createMemo(() => data.session.status(props.sessionID ?? ""))
@@ -355,7 +356,6 @@ export function Prompt(props: PromptProps) {
   createEffect(() => {
     if (!input || input.isDestroyed) return
     input.cursorColor = disabled() ? theme.background.raised.base : theme.text.base
-    input.cursorStyle = config.cursor
   })
 
   const [store, setStore] = createStore<{
@@ -1828,7 +1828,7 @@ export function Prompt(props: PromptProps) {
               focusedTextColor={muted() ? theme.text.muted : theme.text.base}
               minHeight={1}
               maxHeight={maxHeight()}
-              cursorStyle={{ ...config.cursor }}
+              cursorStyle={cursorStyle()}
               onContentChange={() => {
                 const value = input.plainText
                 setStore("prompt", "text", value)
@@ -1887,7 +1887,6 @@ export function Prompt(props: PromptProps) {
                   // setTimeout is a workaround and needs to be addressed properly
                   if (!input || input.isDestroyed) return
                   input.cursorColor = disabled() ? theme.background.raised.base : theme.text.base
-                  input.cursorStyle = config.cursor
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => {
