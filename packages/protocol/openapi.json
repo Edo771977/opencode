@@ -17150,7 +17150,15 @@
             "type": "string"
           },
           "interval": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["auto"]
+              },
+              {
+                "type": "string"
+              }
+            ]
           },
           "duration": {
             "type": "string"
@@ -21521,6 +21529,9 @@
         "properties": {
           "ttl": {
             "$ref": "#/components/schemas/Provider.CacheTTL"
+          },
+          "warming": {
+            "$ref": "#/components/schemas/Provider.CacheWarming"
           }
         },
         "additionalProperties": false
@@ -21528,6 +21539,33 @@
       "Provider.CacheTTL": {
         "type": "string",
         "pattern": "^[+-]?(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[Ee][+-]?\\d+)?(?:ms|s|m|h|d)$"
+      },
+      "Provider.CacheWarming": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "interval": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": ["auto"]
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "duration": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
       },
       "Provider.Compaction": {
         "anyOf": [
