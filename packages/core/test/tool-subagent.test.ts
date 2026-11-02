@@ -224,10 +224,7 @@ describe("SubagentTool", () => {
   // goes idle with a shell and a subagent of its own still running in the background, and one that
   // already finished, which is not left running and is not mentioned.
   completionIt.live("says what a completed subagent left running in its own session", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((dir) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
@@ -290,10 +287,7 @@ describe("SubagentTool", () => {
   // with them, and an answer that does not carry them fails the call with what it said, instead of
   // handing the caller prose to guess at.
   completionIt.live("returns the fields a caller declared, and fails an answer that does not carry them", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((dir) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
@@ -349,10 +343,7 @@ describe("SubagentTool", () => {
   )
 
   completionIt.live("checks declared fields when a background subagent's answer is delivered", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((dir) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
@@ -404,10 +395,7 @@ describe("SubagentTool", () => {
   // The fan-out runs its subtasks at once and reports each on its own: one that misses its declared
   // fields is an error beside a sibling that completed, not a failure of the whole call.
   completionIt.live("runs subtasks at the same time and reports each outcome on its own", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((dir) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
@@ -464,10 +452,7 @@ describe("SubagentTool", () => {
   )
 
   completionIt.live("checks every subtask before starting any, and keeps to two to five", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((dir) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
