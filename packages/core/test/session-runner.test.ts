@@ -1831,7 +1831,7 @@ describe("SessionRunnerLLM", () => {
       expect(
         s.requests
           .at(-1)
-          ?.messages.flatMap((message) => message.content)
+          ?.messages.flatMap((message) => [...message.content])
           .some((part) => part.type === "compaction"),
       ).toBe(false)
       expect(s.requests.at(-1)?.messages[0]?.content).toEqual([Message.text("Original request")])
@@ -1948,6 +1948,7 @@ describe("SessionRunnerLLM", () => {
       "generation",
       "providerOptions",
       "http",
+      "headers",
       "toolChoice",
       "cache",
       "tools",
@@ -2855,6 +2856,7 @@ describe("SessionRunnerLLM", () => {
           "cache",
           "promptCacheKey",
           "http",
+          "headers",
         ] as const)
           expect(compact[field]).toEqual(normal[field])
         expect(compact.toolChoice).toBeUndefined()
@@ -5216,7 +5218,7 @@ describe("SessionRunnerLLM", () => {
   scenario("adds session correlation headers to model requests", function* (s) {
     yield* s.runPrompt("Run correlated request")
 
-    expect(s.requests[0]?.http?.headers).toEqual({
+    expect(s.requests[0]?.headers).toEqual({
       "x-opencode-session-id": sessionID,
       "x-session-affinity": sessionID,
       "X-Session-Id": sessionID,
@@ -5238,7 +5240,7 @@ describe("SessionRunnerLLM", () => {
       .pipe(Effect.orDie)
     yield* s.runPrompt("Run child request")
 
-    expect(s.requests[0]?.http?.headers).toMatchObject({
+    expect(s.requests[0]?.headers).toMatchObject({
       "x-opencode-session-id": sessionID,
       "x-opencode-parent-session-id": parentID,
       "x-session-affinity": parentID,
