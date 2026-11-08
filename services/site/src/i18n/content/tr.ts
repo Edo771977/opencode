@@ -59,59 +59,25 @@ export const content = {
     desktop: {
       title: "OpenCode | macOS, Windows ve Linux için masaüstü uygulaması",
       description:
-        "Birden fazla OpenCode ajanını aynı anda, her birini kendi sekmesinde çalıştırın. Her değişikliği diff olarak inceleyin, satırlara yorum yapın ve sonucu yerleşik tarayıcıda görün.",
+        "İstediğiniz kadar OpenCode ajanını paralel çalıştırın, her değişikliği yanlarındaki tarayıcıda görün ve her cihazdan devam edin. macOS, Windows ve Linux için.",
       intro:
         "Birden fazla ajanı aynı anda, her oturumu kendi sekmesinde çalıştırın. Her değişikliği diff olarak inceleyin, istediğiniz satıra yorum yapın ve sonucu yerleşik tarayıcıda kontrol edin. macOS, Windows ve Linux için.",
-      features: {
-        "built-in-terminal": {
-          title: "Yerleşik terminal",
-          body: "Komutları oturumun yanındaki bir terminal sekmesinde çalıştırın.",
-        },
-        "ssh-servers": {
-          title: "SSH sunucuları",
-          body: "SSH ile başka bir makineye bağlanın ve oradaki projelerde çalışın.",
-        },
-        extensions: {
-          title: "Eklentiler",
-          body: "MCP sunucularını, eklentileri ve becerileri tek menüden yönetin.",
-        },
-        wsl: {
-          title: "WSL",
-          body: "Windows'ta oturumları yerel yerine bir WSL 2 dağıtımında çalıştırın.",
-        },
-        "office-files": {
-          title: "Office dosyaları",
-          body: "Word, Excel ve PowerPoint dosyalarını oturumun yanında açın.",
-        },
-        "keyboard-shortcuts": {
-          title: "Kısayollar",
-          body: "Her eylemin bir klavye kısayolu var ve hepsini değiştirebilirsiniz.",
-        },
-        "updates-itself": {
-          title: "Kendini günceller",
-          body: "Yeni sürümler uygulamanın içinden iner ve kurulur.",
-        },
-        "all-your-projects": {
-          title: "Tüm projeleriniz",
-          body: "Projeler ve oturumları arasında tek pencerede geçiş yapın.",
-        },
-      },
       showcase: {
-        "sessions-in-tabs": {
-          title: "Sekmelerde oturumlar",
-          body: "Birden fazla ajanı aynı anda, her biri kendi sekmesinde çalıştırın.",
-        },
-        "review-and-comment": {
-          title: "İncele ve yorumla",
-          body: "Değişiklikleri diff olarak okuyun, satıra yorum yapıp geri gönderin.",
+        "parallel-agents": {
+          title: "Paralel ajanlar",
+          body: "İstediğiniz kadar ajan başlatın ve hepsinin paralel çalışmasına izin verin. Bitirdikçe aralarında geçiş yapın.",
         },
         "see-it-in-the-browser": {
           title: "Tarayıcıda gör",
-          body: "Ajanın işi geldikçe oturumun yanındaki bir tarayıcıda açılır.",
+          body: "Uygulamanız ajanın yanında bir tarayıcıda açılır, böylece ikiniz de her değişikliği anında görürsünüz.",
         },
-        "pair-your-phone": {
-          title: "Telefonu eşle",
-          body: "Oturumları iPhone'unuzdan yönetmek için OpenCode Mobile'da bir QR kodu okutun.",
+        "on-every-device": {
+          title: "Her cihazda",
+          body: "Tüm cihazlarınızda ajan başlatın ve masaüstü uygulamasından, terminalden ya da telefonunuzdan devam edin.",
+        },
+        "extend-it": {
+          title: "Genişletin",
+          body: "Araçlarınızı ve hizmetlerinizi bağlayın, ajan her şeyle çalışabilsin. Ya da OpenCode'un kendisi için kenar çubuğunda kendi arayüzü olan eklentiler yapmasını sağlayın.",
         },
       },
     },
@@ -414,9 +380,9 @@ export const content = {
           title: "Her MCP istemcisi",
           body: "OpenCode, Claude Code, Cursor, Codex, Zed ve çok daha fazlası.",
         },
-        "named-sessions": {
-          title: "Adlı oturumlar",
-          body: "Her oturum, yeniden başlatmalarda da kendi sekmelerini korur.",
+        "all-your-logins": {
+          title: "Tüm oturum açmalarınız",
+          body: "Ajanlar zaten oturum açtığınız siteleri kullanır. Anahtar yok, kurulum yok.",
         },
         allowlists: {
           title: "İzin listeleri",
@@ -424,10 +390,14 @@ export const content = {
         },
       },
       install:
-        "Tek satır Browse'u kurar, bulduğu ajanlara ekler ve eklentiyle eşler. Windows'ta irm https://opencode.ai/browse/install.ps1 | iex komutunu çalıştırın. Ya da ajanınızdan kurmasını isteyin.",
+        "Önce [Chrome uzantısını] yükleyin. Kalan adımlarda size yol gösterir. CLI'yi doğrudan yüklemek için (buna ihtiyacınız olmamalı) bunlardan birini kullanın.",
     },
   },
   apps: {
+    browse: {
+      category: "Ajanlar için tarayıcı kontrolü",
+      body: "Ajanınız gerçek tarayıcınızı, oturumlarınız ve sekmelerinizle kullansın.",
+    },
     hex: {
       category: "Sesle dikte",
       body: "Her uygulama için cihaz üzerinde sesle dikte.",
@@ -480,7 +450,7 @@ export const content = {
     steps: {
       download: {
         title: "İndir",
-        line: "Masaüstü, mobil ya da terminal.",
+        line: "Masaüstü, terminal ya da mobil.",
       },
       "use-free-models": {
         title: "Ücretsiz modeller",
@@ -824,7 +794,7 @@ export const content = {
       projects: {
         opencode: {
           name: "OpenCode",
-          body: "Masaüstü, mobil ve terminal uygulamaları ile bir SDK'sı olan açık kaynaklı kodlama ajanı. MIT lisanslı, 220.000'den fazla GitHub yıldızı.",
+          body: "Masaüstü, terminal ve mobil uygulamaları ile bir SDK'sı olan açık kaynaklı kodlama ajanı. MIT lisanslı, 220.000'den fazla GitHub yıldızı.",
         },
         sst: {
           name: "SST",
@@ -850,10 +820,11 @@ export const content = {
     },
     about: {
       title: "OpenCode hakkında",
+      body: "OpenCode ve ürünleri için uzun ve kısa sürümlerde, kopyalanmaya hazır tanıtım metinleri.",
       boilerplate: {
-        long: "OpenCode açık kaynaklı bir kodlama ajanıdır. Masaüstü uygulaması, mobil uygulama, terminal arayüzü ve SDK olarak gelir ve Claude, GPT ve Gemini dahil her sağlayıcının modelleriyle çalışır. OpenCode MIT lisanslıdır ve Anomaly tarafından geliştirilir. 220.000'den fazla GitHub yıldızı ve 1.000'den fazla katkıcısı vardır, her ay 22 milyondan fazla geliştirici onu kullanır.",
+        long: "OpenCode açık kaynaklı bir kodlama ajanıdır. Masaüstü uygulaması, terminal arayüzü, mobil uygulama ve SDK olarak gelir ve Claude, GPT ve Gemini dahil her sağlayıcının modelleriyle çalışır. OpenCode MIT lisanslıdır ve Anomaly tarafından geliştirilir. 220.000'den fazla GitHub yıldızı ve 1.000'den fazla katkıcısı vardır, her ay 22 milyondan fazla geliştirici onu kullanır.",
         short:
-          "OpenCode, Anomaly'nin masaüstü, mobil ve terminal uygulamaları ile bir SDK'sı olan açık kaynaklı kodlama ajanıdır.",
+          "OpenCode, Anomaly'nin masaüstü, terminal ve mobil uygulamaları ile bir SDK'sı olan açık kaynaklı kodlama ajanıdır.",
       },
       products: {
         "opencode-console": {

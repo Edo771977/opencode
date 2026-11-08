@@ -37,53 +37,25 @@ export const content = {
     desktop: {
       title: "OpenCode | macOS、Windows、Linux向けデスクトップアプリ",
       description:
-        "複数のOpenCodeエージェントを、それぞれ専用のタブで同時に実行できます。すべての変更を差分で確認し、任意の行にコメントして、内蔵ブラウザで結果をプレビューできます。",
+        "OpenCodeエージェントを好きなだけ並列で実行し、すべての変更を横のブラウザで確認して、どのデバイスからでも再開できます。macOS、Windows、Linuxに対応。",
       intro:
         "複数のエージェントを同時に実行し、セッションごとに専用のタブで管理できます。すべての変更を差分で確認し、任意の行にコメントして、内蔵ブラウザで結果をチェックできます。macOS、Windows、Linuxに対応しています。",
-      features: {
-        "built-in-terminal": {
-          title: "内蔵ターミナル",
-          body: "セッションの横にあるターミナルタブでコマンドを実行できます。",
-        },
-        "ssh-servers": { title: "SSHサーバー", body: "SSHで別のマシンに接続し、そのプロジェクトで作業できます。" },
-        extensions: { title: "拡張機能", body: "MCPサーバー、プラグイン、スキルを1つのメニューで管理できます。" },
-        wsl: {
-          title: "WSL",
-          body: "Windowsでは、ネイティブの代わりにWSL 2ディストリビューションでセッションを実行できます。",
-        },
-        "office-files": {
-          title: "Officeファイル",
-          body: "Word、Excel、PowerPointのファイルをセッションの横で開けます。",
-        },
-        "keyboard-shortcuts": {
-          title: "ショートカット",
-          body: "すべての操作にキーボードショートカットがあり、どれでも変更できます。",
-        },
-        "updates-itself": {
-          title: "自動アップデート",
-          body: "新しいバージョンはアプリからダウンロードしてインストールされます。",
-        },
-        "all-your-projects": {
-          title: "すべてのプロジェクト",
-          body: "1つのウィンドウで、プロジェクトとそのセッションを切り替えられます。",
-        },
-      },
       showcase: {
-        "sessions-in-tabs": {
-          title: "タブでセッション管理",
-          body: "複数のエージェントを同時に動かせます。セッションごとに専用のタブがあります。",
-        },
-        "review-and-comment": {
-          title: "レビューとコメント",
-          body: "変更を差分で読み、行にコメントして、エージェントに送り返せます。",
+        "parallel-agents": {
+          title: "並列エージェント",
+          body: "エージェントを好きなだけ起動して、すべて並列で作業させられます。終わったものから切り替えて確認できます。",
         },
         "see-it-in-the-browser": {
           title: "ブラウザで確認",
-          body: "エージェントの成果は、反映されたそばからセッションの横のブラウザで開きます。",
+          body: "アプリがエージェントの横のブラウザで開くので、あなたとエージェントの両方がすべての変更をその場で確認できます。",
         },
-        "pair-your-phone": {
-          title: "スマホとペアリング",
-          body: "OpenCode MobileでQRコードを読み取ると、iPhoneからセッションを操作できます。",
+        "on-every-device": {
+          title: "あらゆるデバイスで",
+          body: "すべてのデバイスでエージェントを起動し、デスクトップアプリ、ターミナル、スマートフォンから続きを再開できます。",
+        },
+        "extend-it": {
+          title: "拡張する",
+          body: "ツールやサービスを接続すれば、エージェントはどんなものでも扱えます。OpenCodeに自分用のプラグインを作らせ、サイドバーに専用のUIを表示することもできます。",
         },
       },
     },
@@ -302,14 +274,21 @@ export const content = {
           body: "スクリーンショット、画面録画、HAR形式のネットワーク通信。",
         },
         "any-mcp-client": { title: "全MCPクライアント", body: "OpenCode、Claude Code、Cursor、Codex、Zedなど多数。" },
-        "named-sessions": { title: "名前付きセッション", body: "各セッションは再起動後も自分のタブを保持します。" },
+        "all-your-logins": {
+          title: "ログインはそのまま",
+          body: "エージェントは、すでにサインインしているサイトをそのまま使います。キーも設定も不要です。",
+        },
         allowlists: { title: "許可リスト", body: "セッションのタブを、指定したサイトだけに制限できます。" },
       },
       install:
-        "1行でBrowseをインストールし、見つけたエージェントに追加して拡張機能とペアリングします。Windowsでは irm https://opencode.ai/browse/install.ps1 | iex を実行します。エージェントに設定を頼むこともできます。",
+        "まず [Chrome 拡張機能] をインストールしてください。残りの手順は拡張機能が案内します。CLI を直接インストールする場合は(通常は不要です)、次のいずれかを使ってください。",
     },
   },
   apps: {
+    browse: {
+      category: "エージェント向けブラウザ操作",
+      body: "ログインもタブもそのまま、いつものブラウザをエージェントが使えます。",
+    },
     opentunnel: { category: "ローカルトンネル", body: "ローカルアプリに公開HTTPS URLを。" },
     opentui: { category: "ライブラリ", body: "ターミナルUIのためのライブラリ。" },
     hex: { category: "音声入力", body: "どのアプリでも使える、デバイス上の音声入力。" },
@@ -326,7 +305,7 @@ export const content = {
     },
     subscriptions: { "chatgpt-plus-pro": { name: "ChatGPT Plus/Pro" } },
     steps: {
-      download: { title: "ダウンロード", line: "デスクトップ、モバイル、ターミナル。" },
+      download: { title: "ダウンロード", line: "デスクトップ、ターミナル、モバイル。" },
       "use-free-models": {
         title: "無料モデルを使う",
         line: "OpenCodeには無料モデルが付属しています。アカウントは不要です。",
@@ -509,7 +488,7 @@ export const content = {
       projects: {
         opencode: {
           name: "OpenCode",
-          body: "オープンソースのコーディングエージェント。デスクトップ、モバイル、ターミナル向けのアプリとSDKがあります。MITライセンス、GitHubスター220,000以上。",
+          body: "オープンソースのコーディングエージェント。デスクトップ、ターミナル、モバイル向けのアプリとSDKがあります。MITライセンス、GitHubスター220,000以上。",
         },
         sst: {
           name: "SST",
@@ -535,10 +514,11 @@ export const content = {
     },
     about: {
       title: "OpenCodeについて",
+      body: "OpenCodeと各製品の紹介文です。長文版と短文版があり、そのままコピーして使えます。",
       boilerplate: {
-        long: "OpenCodeはオープンソースのコーディングエージェントです。デスクトップアプリ、モバイルアプリ、ターミナルUI、SDKとして提供され、Claude、GPT、Geminiなど、あらゆるプロバイダーのモデルで動作します。OpenCodeはMITライセンスで、Anomalyが開発しています。GitHubスターは220,000以上、コントリビューターは1,000人以上で、毎月2,200万人以上の開発者が利用しています。",
+        long: "OpenCodeはオープンソースのコーディングエージェントです。デスクトップアプリ、ターミナルUI、モバイルアプリ、SDKとして提供され、Claude、GPT、Geminiなど、あらゆるプロバイダーのモデルで動作します。OpenCodeはMITライセンスで、Anomalyが開発しています。GitHubスターは220,000以上、コントリビューターは1,000人以上で、毎月2,200万人以上の開発者が利用しています。",
         short:
-          "OpenCodeはAnomalyが開発するオープンソースのコーディングエージェントで、デスクトップ、モバイル、ターミナル向けのアプリとSDKがあります。",
+          "OpenCodeはAnomalyが開発するオープンソースのコーディングエージェントで、デスクトップ、ターミナル、モバイル向けのアプリとSDKがあります。",
       },
       products: {
         "opencode-console": {
