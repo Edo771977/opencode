@@ -33,38 +33,25 @@ export const content = {
     desktop: {
       title: "OpenCode | macOS, Windows, Linux용 데스크톱 앱",
       description:
-        "여러 OpenCode 에이전트를 각자의 탭에서 동시에 실행하세요. 모든 변경 사항을 diff로 검토하고, 원하는 줄에 댓글을 달고, 내장 브라우저에서 결과를 미리 보세요.",
+        "원하는 만큼 OpenCode 에이전트를 병렬로 실행하고, 옆 브라우저에서 모든 변경 사항을 확인하고, 어떤 기기에서든 이어서 작업하세요. macOS, Windows, Linux용.",
       intro:
         "여러 에이전트를 동시에 실행하고, 세션마다 각자의 탭을 쓰세요. 모든 변경 사항을 diff로 검토하고, 원하는 줄에 댓글을 달고, 내장 브라우저에서 결과를 확인하세요. macOS, Windows, Linux를 지원합니다.",
-      features: {
-        "built-in-terminal": { title: "내장 터미널", body: "세션 옆 터미널 탭에서 명령어를 실행하세요." },
-        "ssh-servers": { title: "SSH 서버", body: "SSH로 다른 컴퓨터에 연결해 그곳의 프로젝트를 작업하세요." },
-        extensions: { title: "확장 프로그램", body: "MCP 서버, 플러그인, 스킬을 한 메뉴에서 관리하세요." },
-        wsl: { title: "WSL", body: "Windows에서 세션을 네이티브 대신 WSL 2 배포판에서 실행하세요." },
-        "office-files": { title: "Office 파일", body: "Word, Excel, PowerPoint 파일을 세션 옆에서 여세요." },
-        "keyboard-shortcuts": {
-          title: "키보드 단축키",
-          body: "모든 작업에 단축키가 있고, 원하는 대로 바꿀 수 있습니다.",
-        },
-        "updates-itself": { title: "자동 업데이트", body: "새 버전을 앱에서 바로 다운로드하고 설치합니다." },
-        "all-your-projects": { title: "모든 프로젝트", body: "한 창에서 프로젝트와 세션을 오가며 작업하세요." },
-      },
       showcase: {
-        "pair-your-phone": {
-          title: "휴대폰 페어링",
-          body: "OpenCode Mobile에서 QR 코드를 스캔해 iPhone으로 세션을 조종하세요.",
-        },
-        "sessions-in-tabs": {
-          title: "탭으로 나뉜 세션",
-          body: "여러 에이전트를 동시에 일하게 하세요. 세션마다 탭이 따로 있습니다.",
-        },
-        "review-and-comment": {
-          title: "검토와 댓글",
-          body: "변경 사항을 diff로 읽고, 줄에 댓글을 달아 다시 보내세요.",
+        "parallel-agents": {
+          title: "병렬 에이전트",
+          body: "원하는 만큼 에이전트를 시작하고 모두 병렬로 작업하게 하세요. 작업이 끝나는 대로 에이전트 사이를 오가세요.",
         },
         "see-it-in-the-browser": {
           title: "브라우저에서 확인",
-          body: "에이전트의 결과물이 나오는 대로 세션 옆 브라우저에서 열립니다.",
+          body: "앱이 에이전트 옆 브라우저에서 열리므로, 당신과 에이전트 모두 모든 변경 사항을 바로 확인할 수 있습니다.",
+        },
+        "on-every-device": {
+          title: "모든 기기에서",
+          body: "모든 기기에서 에이전트를 시작하고, 데스크톱 앱, 터미널, 휴대폰에서 이어서 작업하세요.",
+        },
+        "extend-it": {
+          title: "확장하기",
+          body: "도구와 서비스를 연결해 에이전트가 무엇이든 다룰 수 있게 하세요. 또는 OpenCode가 스스로 플러그인을 만들게 하고, 사이드바에 전용 UI를 띄우세요.",
         },
       },
     },
@@ -238,14 +225,21 @@ export const content = {
           title: "모든 MCP 클라이언트",
           body: "OpenCode, Claude Code, Cursor, Codex, Zed 등 다양한 클라이언트.",
         },
-        "named-sessions": { title: "이름 있는 세션", body: "각 세션은 재시작 후에도 자기 탭을 유지합니다." },
+        "all-your-logins": {
+          title: "모든 로그인 그대로",
+          body: "에이전트가 이미 로그인한 사이트를 그대로 사용합니다. 키도, 설정도 필요 없습니다.",
+        },
         allowlists: { title: "허용 목록", body: "세션의 탭을 지정한 사이트로만 제한하세요." },
       },
       install:
-        "한 줄로 Browse를 설치하고, 찾은 에이전트에 추가하고 확장 프로그램과 페어링합니다. Windows에서는 irm https://opencode.ai/browse/install.ps1 | iex 를 실행하세요. 에이전트에게 설정을 맡겨도 됩니다.",
+        "먼저 [Chrome 확장 프로그램]을 설치하세요. 나머지 단계는 확장 프로그램이 안내합니다. CLI를 직접 설치하려면(보통은 필요 없습니다) 아래 명령 중 하나를 사용하세요.",
     },
   },
   apps: {
+    browse: {
+      category: "에이전트용 브라우저 제어",
+      body: "로그인과 탭이 그대로인 실제 브라우저를 에이전트가 사용하게 하세요.",
+    },
     hex: { category: "음성 받아쓰기", body: "어떤 앱에서든 쓰는 온디바이스 음성 받아쓰기." },
     opentunnel: { category: "로컬 터널", body: "로컬 앱을 위한 공개 HTTPS URL." },
     opentui: { category: "라이브러리", body: "터미널 사용자 인터페이스를 위한 라이브러리." },
@@ -262,7 +256,7 @@ export const content = {
     },
     subscriptions: { "chatgpt-plus-pro": { name: "ChatGPT Plus/Pro" } },
     steps: {
-      download: { title: "다운로드", line: "데스크톱, 모바일, 터미널 중에서 고르세요." },
+      download: { title: "다운로드", line: "데스크톱, 터미널, 모바일 중에서 고르세요." },
       "use-free-models": {
         title: "무료 모델 사용",
         line: "OpenCode에는 무료 모델이 기본으로 들어 있습니다. 계정은 필요 없습니다.",
@@ -444,7 +438,7 @@ export const content = {
       projects: {
         opencode: {
           name: "OpenCode",
-          body: "데스크톱, 모바일, 터미널 앱과 SDK를 갖춘 오픈 소스 코딩 에이전트. MIT 라이선스, GitHub 스타 220,000개 이상.",
+          body: "데스크톱, 터미널, 모바일 앱과 SDK를 갖춘 오픈 소스 코딩 에이전트. MIT 라이선스, GitHub 스타 220,000개 이상.",
         },
         sst: {
           name: "SST",
@@ -470,9 +464,10 @@ export const content = {
     },
     about: {
       title: "OpenCode 소개",
+      body: "OpenCode와 각 제품의 소개 글입니다. 긴 버전과 짧은 버전이 있으며 바로 복사해 쓸 수 있습니다.",
       boilerplate: {
-        long: "OpenCode는 오픈 소스 코딩 에이전트입니다. 데스크톱 앱, 모바일 앱, 터미널 UI, SDK로 제공되며, Claude, GPT, Gemini를 비롯해 모든 제공자의 모델과 함께 작동합니다. OpenCode는 MIT 라이선스이며 Anomaly가 만듭니다. GitHub 스타 220,000개 이상, 기여자 1,000명 이상을 보유하고 있으며, 매달 2,200만 명 이상의 개발자가 사용합니다.",
-        short: "OpenCode는 Anomaly가 만든 오픈 소스 코딩 에이전트로, 데스크톱, 모바일, 터미널 앱과 SDK를 제공합니다.",
+        long: "OpenCode는 오픈 소스 코딩 에이전트입니다. 데스크톱 앱, 터미널 UI, 모바일 앱, SDK로 제공되며, Claude, GPT, Gemini를 비롯해 모든 제공자의 모델과 함께 작동합니다. OpenCode는 MIT 라이선스이며 Anomaly가 만듭니다. GitHub 스타 220,000개 이상, 기여자 1,000명 이상을 보유하고 있으며, 매달 2,200만 명 이상의 개발자가 사용합니다.",
+        short: "OpenCode는 Anomaly가 만든 오픈 소스 코딩 에이전트로, 데스크톱, 터미널, 모바일 앱과 SDK를 제공합니다.",
       },
       products: {
         "opencode-console": {
