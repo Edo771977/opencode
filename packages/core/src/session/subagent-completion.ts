@@ -2,12 +2,26 @@ export * as SubagentCompletion from "./subagent-completion.js"
 
 import { Effect } from "effect"
 import type { Job } from "../job.js"
-import type { Session } from "../session.js"
+import type { SessionBackground } from "./background.js"
 import type { SessionMessage } from "./message.js"
 import type { SessionSchema } from "./schema.js"
 import { SubagentOutput } from "./subagent-output.js"
 
 export const NO_TEXT = "Subagent completed without a text response."
+
+export type RunningBackgroundItem = SessionBackground.OutstandingItem
+
+/** A Session handle narrow enough for both Session.Service and SessionExecution to deliver a report. */
+export interface SyntheticSession<E = never> {
+  readonly synthetic: (input: {
+    readonly id?: SessionMessage.ID
+    readonly sessionID: SessionSchema.ID
+    readonly text: string
+    readonly description?: string
+    readonly metadata?: SessionSchema.Metadata
+    readonly resume?: boolean
+  }) => Effect.Effect<unknown, E>
+}
 
 export function text(message: SessionMessage.Info | undefined) {
   if (message?.type !== "assistant") return NO_TEXT
@@ -20,47 +34,29 @@ export function text(message: SessionMessage.Info | undefined) {
   )
 }
 
-/**
- * Background work a Session started and has not finished: its own background shells, and the
- * subagents it launched in the background. Each record names the Session that owns it.
- */
-export const leftRunning = (jobs: Pick<Job.Interface, "pendingBackground">, sessionID: SessionSchema.ID) =>
-  jobs.pendingBackground.pipe(
-    Effect.map((pending) =>
-      pending.filter(
-        (job) =>
-          job.status === "running" &&
-          (job.recovery.kind === "subagent"
-            ? job.recovery.parentSessionID === sessionID
-            : job.recovery.sessionID === sessionID),
-      ),
-    ),
-  )
+const clean = (value: string) => value.replace(/\s+/g, " ").trim()
 
-/**
- * A subagent reported as done must say what it left running. Detached work answers to the
- * subagent's own Session, so a caller told only "completed" would act on a result missing a piece.
- */
-export function withLeftRunning(text: string, sessionID: SessionSchema.ID, running: readonly Job.Background[]) {
-  if (running.length === 0) return text
-  return [
-    text,
-    "",
-    `${LEFT_RUNNING} (sessionID: ${sessionID}):`,
-    ...running.map((job) => {
-      if (job.recovery.kind === "shell") return `- shell: ${job.recovery.command}`
-      if (job.recovery.kind === "image") return `- image: ${job.recovery.path} (${job.recovery.model})`
-      return `- subagent: ${job.recovery.description} (sessionID: ${job.recovery.childSessionID})`
-    }),
-    "That work reports to the subagent's session, not to you. Do not treat the answer above as the whole result: continue the subagent with its sessionID to collect what is still running, or account for it in what you do next.",
-  ].join("\n")
+const BACKGROUND = "Background work still running:"
+
+export function formatBody(
+  body: string,
+  childSessionID: SessionSchema.ID,
+  background?: ReadonlyArray<RunningBackgroundItem>,
+): string {
+  if (!background || background.length === 0) return body
+  const lines = background.map((item) => {
+    if (item.kind === "shell")
+      return `- shell (${item.shellID}${item.sessionID !== childSessionID ? `, in ${item.sessionID}` : ""}): ${clean(item.command)}`
+    if (item.kind === "image")
+      return `- image (${item.model}${item.sessionID !== childSessionID ? `, in ${item.sessionID}` : ""}): ${item.path}`
+    return `- subagent (${item.agent}, sessionID: ${item.childSessionID}): ${clean(item.description)}`
+  })
+  return `${body}\n\n${BACKGROUND}\n${lines.join("\n")}`
 }
-
-const LEFT_RUNNING = "This subagent finished its answer but left work running in its own session"
 
 /**
  * Checks an answer against the fields its caller declared. Only the subagent's own answer is parsed;
- * what it left running is reported after the fields, never mistaken for them.
+ * the background work listed after it is reported after the fields, never mistaken for them.
  */
 export function declared(
   output: string,
@@ -68,7 +64,7 @@ export function declared(
   sessionID: SessionSchema.ID,
 ): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly message: string } {
   if (!fields?.length) return { ok: true, text: output }
-  const split = output.lastIndexOf(`\n\n${LEFT_RUNNING}`)
+  const split = output.lastIndexOf(`\n\n${BACKGROUND}`)
   const answer = split < 0 ? output : output.slice(0, split)
   const note = split < 0 ? undefined : output.slice(split + 2)
   const parsed = SubagentOutput.parse(answer, fields)
@@ -76,8 +72,8 @@ export function declared(
   return { ok: true, text: [JSON.stringify(parsed.value, null, 2), ...(note ? [note] : [])].join("\n\n") }
 }
 
-export const deliver = Effect.fnUntraced(function* (
-  sessions: Pick<Session.Interface, "synthetic">,
+export const deliver = Effect.fnUntraced(function* <E>(
+  sessions: SyntheticSession<E>,
   jobs: Pick<Job.Interface, "completeBackground">,
   input: Pick<Job.Info, "status" | "output" | "error" | "notificationID"> & {
     recovery: Extract<Job.Recovery, { kind: "subagent" }>
@@ -91,19 +87,19 @@ export const deliver = Effect.fnUntraced(function* (
       ? declared(input.output ?? NO_TEXT, recovery.output, recovery.childSessionID)
       : undefined
   const state = checked?.ok === false ? "error" : input.status
-  const text = checked
+  const body = checked
     ? checked.ok
       ? checked.text
       : checked.message
     : input.status === "error"
       ? (input.error ?? "Subagent failed")
-      : "Subagent cancelled"
+      : (input.output ?? input.error ?? "Subagent cancelled")
   yield* sessions.synthetic({
     ...(input.notificationID ? { id: input.notificationID } : {}),
     sessionID: recovery.parentSessionID,
     ...(input.resume === false ? { resume: false } : {}),
     description: recovery.description,
-    text: `<subagent sessionID="${recovery.childSessionID}" state="${state}" description="${recovery.description}">\n${text}\n</subagent>`,
+    text: `<subagent sessionID="${recovery.childSessionID}" state="${state}" description="${recovery.description}">\n${body}\n</subagent>`,
     metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state },
   })
   if (input.notificationID) yield* jobs.completeBackground(input.notificationID)

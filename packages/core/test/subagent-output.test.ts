@@ -123,13 +123,8 @@ describe("SubagentOutput.parse", () => {
 describe("SubagentCompletion.declared", () => {
   const child = Session.ID.make("ses_child")
   const answer = 'Done.\n```json\n{ "summary": "fixed", "files": ["a.ts"] }\n```'
-  const note = SubagentCompletion.withLeftRunning("", child, [
-    {
-      id: "shell-dev",
-      notificationID: "msg_note" as never,
-      status: "running",
-      recovery: { kind: "shell", sessionID: child, shellID: "shell-dev", command: "bun run dev" },
-    },
+  const note = SubagentCompletion.formatBody("", child, [
+    { kind: "shell", sessionID: child, shellID: "shell-dev", command: "bun run dev" },
   ]).trim()
 
   test("parses only the answer and reports what was left running after the fields", () => {
