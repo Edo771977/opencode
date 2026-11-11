@@ -4,6 +4,7 @@ import { Model } from "../model.js"
 import { Permission } from "../permission.js"
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
+import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -60,6 +61,7 @@ export interface Interface {
   ) => Effect.Effect<Loaded, SessionRunnerModel.Error>
   readonly resolveModel: (
     session: SessionSchema.Info,
+    request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
   /** Selects auxiliary title capabilities without instruction or tool preflight. */
   readonly selectTitle: (session: SessionSchema.Info) => Effect.Effect<
@@ -95,12 +97,17 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
 
-    const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
+    const resolveModel = (
+      session: SessionSchema.Info,
+      request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
+    ) => models.resolve(session, model.available, request)
 
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
       if (!agent) return
-      const primary = yield* resolveModel(session).pipe(Effect.orElseSucceed(() => undefined))
+      const primary = yield* resolveModel(session, { kind: "title", agent: agent.id }).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
       const candidate = yield* Effect.gen(function* () {
         if (agent.model) {
           const info = yield* model.get(agent.model.providerID, agent.model.id)
@@ -116,14 +123,17 @@ const layer = Layer.effect(
       })
       const preferred =
         candidate &&
-        (yield* resolveModel({
-          ...session,
-          model: Model.Ref.make({
-            providerID: candidate.info.providerID,
-            id: candidate.info.id,
-            ...(candidate.variant ? { variant: candidate.variant } : {}),
-          }),
-        }).pipe(Effect.orElseSucceed(() => undefined)))
+        (yield* resolveModel(
+          {
+            ...session,
+            model: Model.Ref.make({
+              providerID: candidate.info.providerID,
+              id: candidate.info.id,
+              ...(candidate.variant ? { variant: candidate.variant } : {}),
+            }),
+          },
+          { kind: "title", agent: agent.id },
+        ).pipe(Effect.orElseSucceed(() => undefined)))
       const selected = preferred ?? primary
       if (!selected) return
       return { agent, primary, selected }
@@ -180,6 +190,7 @@ const layer = Layer.effect(
     const resolveSmall = Effect.fn("SessionContext.resolveSmall")(function* (
       session: SessionSchema.Info,
       primary: SessionRunnerModel.Resolved,
+      request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
     ) {
       const title = yield* agents.get(Agent.ID.make("title"))
       const configured = title?.model ? yield* model.get(title.model.providerID, title.model.id) : undefined
@@ -196,14 +207,17 @@ const layer = Layer.effect(
         const variant = candidate.info.variants.some((item) => item.id === candidate.variant)
           ? candidate.variant
           : undefined
-        const resolved = yield* resolveModel({
-          ...session,
-          model: Model.Ref.make({
-            providerID: candidate.info.providerID,
-            id: candidate.info.id,
-            ...(variant ? { variant } : {}),
-          }),
-        }).pipe(Effect.orElseSucceed(() => undefined))
+        const resolved = yield* resolveModel(
+          {
+            ...session,
+            model: Model.Ref.make({
+              providerID: candidate.info.providerID,
+              id: candidate.info.id,
+              ...(variant ? { variant } : {}),
+            }),
+          },
+          request,
+        ).pipe(Effect.orElseSucceed(() => undefined))
         if (resolved) return resolved
       }
       // A missing small model never fails a step: the agent runs on the session model.
@@ -214,11 +228,15 @@ const layer = Layer.effect(
       selection: Selection,
       options?: { readonly small?: boolean },
     ) {
-      const primary = yield* resolveModel(selection.session)
+      // The small model still answers the agent's primary request, so plugins see it as one.
+      const request = { kind: "primary", agent: selection.agent.id } as const
+      const primary = yield* resolveModel(selection.session, request)
       // Resolved here rather than at the request, so that the history, the compaction ceiling, the
       // prompt estimate, the request and its cost all follow the model that answers the step.
       const model =
-        selection.agent.info.small || options?.small ? yield* resolveSmall(selection.session, primary) : primary
+        selection.agent.info.small || options?.small
+          ? yield* resolveSmall(selection.session, primary, request)
+          : primary
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,
