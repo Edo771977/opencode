@@ -234,7 +234,7 @@ const table = sqliteTable("session", {
 - The budget can ask instead of degrading, through the `budget` permission: `allow` degrades as before, `ask` asks once per request while past the budget, `deny` ends every request that goes past it. An authorized run keeps its model and tools; a refused one ends in the same step without tools as the ceiling, carrying the reason given.
 - That gate reads the level, not the step that crossed: an agent past its budget is past it on every later step. Only a rule naming `budget` decides it, never a ruleset's catch-all, which is about tools and which several built-in agents set to deny. It never asks on a step that already ends the run, because a question a yes cannot change only makes a run configured to stop wait for somebody.
 - A model resolved as small must still be able to call tools, and must differ from the session model in provider as well as id. The same id on another provider is a different route, different credentials and different billing.
-- A subagent reported as done must say what it left running. Spawning with `background: true` detaches, and the detached task's answer goes to the subagent's own Session, so a caller told only "completed" would act on a result that is missing a piece.
+- A subagent's report must say what it left running. Subagents always run in the background and report to their caller each time they go idle, but work they detached keeps running past that report, so a caller told only "completed" would act on a result that is missing a piece.
 
 ## Configuration Compatibility
 

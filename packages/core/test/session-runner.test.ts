@@ -509,7 +509,6 @@ const layer = Layer.unwrap(
           wake: coordinator.wake,
           interrupt: (sessionID) => coordinator.interrupt(sessionID),
           awaitIdle: coordinator.awaitIdle,
-          periodStartSeq: () => Effect.succeed(undefined),
         })
       }),
     ).pipe(
