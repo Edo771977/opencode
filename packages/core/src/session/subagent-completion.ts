@@ -35,7 +35,7 @@ export function text(message: SessionMessage.Info | undefined) {
 
 const clean = (value: string) => value.replace(/\s+/g, " ").trim()
 
-const BACKGROUND = "Background work still running:"
+const STILL_RUNNING = "\n\nBackground work still running:\n"
 
 export function formatBody(
   body: string,
@@ -50,7 +50,7 @@ export function formatBody(
       return `- image (${item.model}${item.sessionID !== childSessionID ? `, in ${item.sessionID}` : ""}): ${item.path}`
     return `- subagent (${item.agent}, sessionID: ${item.childSessionID}): ${clean(item.description)}`
   })
-  return `${body}\n\n${BACKGROUND}\n${lines.join("\n")}`
+  return `${body}${STILL_RUNNING}${lines.join("\n")}`
 }
 
 /**
@@ -63,7 +63,7 @@ export function declared(
   sessionID: SessionSchema.ID,
 ): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly message: string } {
   if (!fields?.length) return { ok: true, text: output }
-  const split = output.lastIndexOf(`\n\n${BACKGROUND}`)
+  const split = output.lastIndexOf(STILL_RUNNING)
   const answer = split < 0 ? output : output.slice(0, split)
   const note = split < 0 ? undefined : output.slice(split + 2)
   const parsed = SubagentOutput.parse(answer, fields)
@@ -84,7 +84,8 @@ export const deliver = Effect.fnUntraced(function* <E>(
     input.status === "completed"
       ? declared(input.output ?? NO_TEXT, recovery.output, recovery.childSessionID)
       : undefined
-  const state = checked?.ok === false ? "error" : input.status
+  // An answer missing its declared fields is an error, in the tag and in the metadata alike.
+  const status = checked?.ok === false ? "error" : input.status
   const body = checked
     ? checked.ok
       ? checked.text
@@ -92,12 +93,15 @@ export const deliver = Effect.fnUntraced(function* <E>(
     : input.status === "error"
       ? (input.error ?? "Subagent failed")
       : (input.output ?? input.error ?? "Subagent cancelled")
+  // The body is all a recovered outbox row keeps, so the still-running list is how a replay tells this period apart.
+  // Only the model-facing tag says "running": the job and the message metadata keep the period's real status.
+  const state = status === "completed" && body.includes(STILL_RUNNING) ? "running" : status
   yield* sessions.synthetic({
     ...(input.notificationID ? { id: input.notificationID } : {}),
     sessionID: recovery.parentSessionID,
     description: recovery.description,
     text: `<subagent sessionID="${recovery.childSessionID}" state="${state}" description="${recovery.description}">\n${body}\n</subagent>`,
-    metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state },
+    metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state: status },
   })
   if (input.notificationID) yield* jobs.completeBackground(input.notificationID)
 })
