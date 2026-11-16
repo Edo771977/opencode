@@ -93,14 +93,15 @@ export const deliver = Effect.fnUntraced(function* <E>(
     : input.status === "error"
       ? (input.error ?? "Subagent failed")
       : (input.output ?? input.error ?? "Subagent cancelled")
-  // The body is all a recovered outbox row keeps, so the still-running list is how a replay tells this period apart.
+  // Older rows lack the snapshot. Replay their recorded job status and preserve the full report body.
   // Only the model-facing tag says "running": the job and the message metadata keep the period's real status.
-  const state = status === "completed" && body.includes(STILL_RUNNING) ? "running" : status
+  const state = status === "completed" && recovery.outstanding?.length ? "running" : status
+  const formatted = formatBody(body, recovery.childSessionID, recovery.outstanding)
   yield* sessions.synthetic({
     ...(input.notificationID ? { id: input.notificationID } : {}),
     sessionID: recovery.parentSessionID,
     description: recovery.description,
-    text: `<subagent sessionID="${recovery.childSessionID}" state="${state}" description="${recovery.description}">\n${body}\n</subagent>`,
+    text: `<subagent sessionID="${recovery.childSessionID}" state="${state}" description="${recovery.description}">\n${formatted}\n</subagent>`,
     metadata: { source: "subagent", childID: recovery.childSessionID, agent: recovery.agent, state: status },
   })
   if (input.notificationID) yield* jobs.completeBackground(input.notificationID)
