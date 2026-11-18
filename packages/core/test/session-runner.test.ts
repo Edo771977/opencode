@@ -415,7 +415,6 @@ const layer = Layer.unwrap(
       project: true,
       global: true,
       claude: true,
-      claudeGlobal: true,
       load: () => Effect.succeed(Instructions.empty),
     })
     const skillInstructions = Layer.mock(SkillInstructions.Service, {
