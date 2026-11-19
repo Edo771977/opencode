@@ -1,3 +1,4 @@
+import { VideoID } from "@opencode/schema/generate"
 import { Schema } from "effect"
 import { SessionSchema } from "../session/schema.js"
 import { SubagentOutput } from "../session/subagent-output.js"
@@ -14,6 +15,11 @@ const Image = Schema.Struct({
   path: Schema.String,
   model: Schema.String,
 })
+const Video = Schema.Struct({
+  kind: Schema.Literal("video"),
+  sessionID: SessionSchema.ID,
+  path: Schema.String,
+})
 const subagent = {
   kind: Schema.Literal("subagent"),
   childSessionID: SessionSchema.ID,
@@ -25,6 +31,7 @@ const CodeMode = Schema.Struct({ kind: Schema.Literal("codemode"), sessionID: Se
 const OutstandingItem = Schema.Union([
   Shell,
   Image,
+  Video,
   CodeMode,
   Schema.Struct({ ...subagent, sessionID: SessionSchema.ID }),
 ])
@@ -34,6 +41,7 @@ export const RecoverySchema = Schema.Union([
   CodeMode,
   Shell,
   Image,
+  Schema.Struct({ ...Video.fields, videoID: VideoID }),
   Schema.Struct({
     ...subagent,
     parentSessionID: SessionSchema.ID,
