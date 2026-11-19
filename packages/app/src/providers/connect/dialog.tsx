@@ -107,10 +107,8 @@ export const DialogConnectProvider: Component<{
 
   return (
     <Dialog
-      size="normal"
+      size="large"
       fit
-      anchored
-      containerClass="!bg-v2-background-bg-base"
       preventBackdropDismiss={view().preventBackdropDismiss}
       onCloseAutoFocus={(event) => {
         if (view().completed && props.selection && props.onDone) {
@@ -127,13 +125,11 @@ export const DialogConnectProvider: Component<{
       }}
       class="[font-family:var(--v2-font-family-sans)]"
       classList={{
-        "[&_[data-slot=dialog-header]]:!px-4 [&_[data-slot=dialog-header]]:!pt-4 [&_[data-slot=dialog-close-button]]:!mt-0 [&_[data-slot=dialog-close-button]]:!-me-0.5": true,
+        "[&_[data-slot=dialog-header]]:!px-4 [&_[data-slot=dialog-header]]:!pt-3.5 [&_[data-slot=dialog-close-button]]:!mt-0 [&_[data-slot=dialog-close-button]]:!-me-0.5": true,
         "[&_[data-slot=dialog-header]]:!pb-2": frame() !== "models",
         "[&_[data-slot=dialog-header-title]]:!text-[15px] [&_[data-slot=dialog-header-title]]:!tracking-[-0.13px]":
           frame() === "models",
         "search-dialog": frame() === "picker" || frame() === "accounts",
-        "[&_[data-slot=dialog-description]]:!text-[13px] [&_[data-slot=dialog-description]]:!tracking-[-0.04px]":
-          frame() === "picker",
       }}
     >
       <DialogHeader closeLabel={language.t("common.close")}>
@@ -293,8 +289,15 @@ const METHOD_ICON = {
   external: "server",
 } as const satisfies Record<ProviderConnectMethod["type"], string>
 
-// The TUI's integration groups and order, with connected integrations pulled up into their own group first.
-const POPULAR = ["opencode", "opencode-go", "openai", "github-copilot", "anthropic", "google"]
+// The TUI's integration groups, with connected integrations pulled up into their own group first. Unlike the TUI,
+// Go comes before Console here.
+const POPULAR = ["opencode-go", "opencode", "openai", "github-copilot", "anthropic", "google"]
+
+const providerNote = (id: string) => {
+  if (id === "opencode-go") return "dialog.provider.opencodeGo.tagline" as const
+
+  if (id === "opencode") return "dialog.provider.opencode.note" as const
+}
 
 function ProviderPicker(props: { directory?: string; onSelect: (provider: string) => void; onPrepare?: () => void }) {
   const integrations = useIntegrations(() => props.directory)
@@ -446,6 +449,13 @@ function ProviderPicker(props: { directory?: string; onSelect: (provider: string
                             <span class="min-w-0 truncate font-[440] text-v2-text-text-faint">
                               {language.t("dialog.provider.environmentOnly")}
                             </span>
+                          </Show>
+                          <Show when={!disabled(provider) && !account() && providerNote(provider.id)}>
+                            {(key) => (
+                              <span class="min-w-0 shrink-[999] truncate font-[440] text-v2-text-text-muted">
+                                {language.t(key())}
+                              </span>
+                            )}
                           </Show>
                           <Show when={account()}>
                             {(label) => (
