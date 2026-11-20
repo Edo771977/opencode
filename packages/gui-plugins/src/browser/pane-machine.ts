@@ -1,6 +1,7 @@
 import { Browser } from "@opencode/plugin-browser/rpc"
 import { Option, Predicate, Schema } from "effect"
 import type { PaneCloseReason, PaneEvent } from "./ipc"
+import type { PageEnd } from "./page-log"
 
 /** How long a binding may wait for the server's `attached` handshake before it closes. */
 export const REGISTER_TIMEOUT_MS = 15_000
@@ -102,16 +103,21 @@ export type BindingEvent =
       readonly tab: Browser.Tab
       readonly error?: string
     }
-  /** The page's renderer crashed, its debugger detached, or it failed to become ready. */
+  /**
+   * The page's renderer crashed, its debugger detached, or it failed to become ready. `ended` says which, for the
+   * agent's commands that were running on the tab.
+   */
   | {
       readonly type: "tab.crashed"
       readonly tabID: Browser.TabID
       readonly attempt: number
       readonly tab?: Browser.Tab
+      readonly ended?: PageEnd
     }
   | { readonly type: "tab.focused"; readonly tabID: Browser.TabID; readonly fromStrip?: boolean }
   | { readonly type: "tab.active"; readonly tabID: Browser.TabID }
-  | { readonly type: "tab.closed"; readonly tabID: Browser.TabID }
+  /** `opener`: the tab that opened it, which takes the pane back when the closed tab was in front. */
+  | { readonly type: "tab.closed"; readonly tabID: Browser.TabID; readonly opener?: Browser.TabID }
 
 export type PaneMachineEvent =
   | {
@@ -141,7 +147,8 @@ export type PaneEffect =
     }
   /** To the window only. */
   | { readonly type: "emit"; readonly binding: string; readonly event: PaneEvent }
-  | { readonly type: "abort-requests"; readonly binding: string; readonly requestIDs: readonly string[] }
+  /** `ended` is why the page of the requests' tab stopped, when that is what aborts them. */
+  | { readonly type: "abort-requests"; readonly binding: string; readonly requestIDs: readonly string[]; readonly ended?: PageEnd }
   | { readonly type: "release-pages"; readonly binding: string; readonly attempts: readonly number[] }
   /** Rejects a pending `register` call, stops the timer and listeners, and ends the attachment. Always last. */
   | { readonly type: "teardown"; readonly binding: string }
@@ -398,9 +405,16 @@ function transitionAttached(state: AttachedBinding, event: BindingEvent): Bindin
     if (!closed) return { state, effects: [] }
     const tabs = new Map(state.tabs)
     tabs.delete(event.tabID)
-    const focusedTabID = state.focusedTabID === event.tabID ? (tabs.keys().next().value ?? null) : state.focusedTabID
+    const front = state.focusedTabID === event.tabID
+    // As Chrome selects the tab that opened one closed in front of it. The window hears of the selection first, so
+    // its strip never picks a neighbour for the closed tab.
+    const opener = front && event.opener !== undefined && tabs.has(event.opener) ? event.opener : undefined
+    const focusedTabID = front ? (opener ?? tabs.keys().next().value ?? null) : state.focusedTabID
+    const next = withoutTab({ ...state, tabs, focusedTabID, agentTabID: event.tabID === state.agentTabID ? undefined : state.agentTabID }, event.tabID, closed, undefined)
 
-    return withoutTab({ ...state, tabs, focusedTabID, agentTabID: event.tabID === state.agentTabID ? undefined : state.agentTabID }, event.tabID, closed, undefined)
+    if (!opener) return next
+
+    return { state: next.state, effects: [{ type: "emit", binding: state.binding, event: { type: "focus", tabID: opener } }, ...next.effects] }
   }
 
   if (event.type !== "tab.published" && event.type !== "tab.crashed") return { state, effects: [] }
@@ -432,18 +446,18 @@ function transitionAttached(state: AttachedBinding, event: BindingEvent): Bindin
     },
   })
 
-  return withoutTab({ ...state, tabs }, event.tabID, slot, "page_crashed")
+  return withoutTab({ ...state, tabs }, event.tabID, slot, "page_crashed", event.ended)
 }
 
 /** Aborts the requests that target a tab whose page went away, releases that page, and publishes the result. */
-function withoutTab(state: AttachedBinding, tabID: Browser.TabID, slot: TabSlot, error: string | undefined) {
+function withoutTab(state: AttachedBinding, tabID: Browser.TabID, slot: TabSlot, error: string | undefined, ended?: PageEnd) {
   const targeting = Array.from(state.requests).flatMap(([requestID, target]) => (target === tabID ? [requestID] : []))
   const requests = new Map(state.requests)
   targeting.forEach((requestID) => requests.delete(requestID))
   const next = publish({ ...state, requests }, error)
   const effects: PaneEffect[] = []
 
-  if (targeting.length) effects.push({ type: "abort-requests", binding: state.binding, requestIDs: targeting })
+  if (targeting.length) effects.push({ type: "abort-requests", binding: state.binding, requestIDs: targeting, ...(ended && { ended }) })
 
   if (slot.status === "live") effects.push({ type: "release-pages", binding: state.binding, attempts: [slot.attempt] })
 
