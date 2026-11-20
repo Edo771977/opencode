@@ -19,7 +19,11 @@ export const registry = {
     "Watch Slack threads, GitHub pull requests, issues, commits and Actions runs, and the workspace's MCP servers' events through OpenCode Console, and wake sessions when they change.",
   mcp_events:
     "Enable experimental MCP Events, a draft MCP extension: declare support to MCP servers and read the events of servers that offer them.",
+  recommended_api: "Use each model's recommended API from models.dev instead of the first API it lists.",
   full_codemode: "Enable the full Code Mode work in progress.",
+  machines: "Let a tool path name a machine, as in gpu:/work/train.py, and act on that machine's files and processes.",
+  home_memory:
+    "Give sessions in the home folder a persistent memory/, docs/ and scripts/ workspace the agent can use freely, tidied by a daily maintenance session that reads the day's home-folder conversations.",
 } as const satisfies Record<string, string>
 export type Key = keyof typeof registry
 

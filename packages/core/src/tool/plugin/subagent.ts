@@ -22,7 +22,7 @@ const backgroundResult = (sessionID: SessionSchema.ID) => ({
   sessionID,
   status: "running" as const,
   output: [
-    `The subagent is working in the background (sessionID: ${sessionID}). You will receive a <subagent> message when it goes idle, and again after each later round of work.`,
+    `The subagent is working in the background (sessionID: ${sessionID}). You will receive a <background-result kind="subagent"> message when it goes idle, and again after each later round of work.`,
     "DO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.",
     "Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.",
     "To send it follow-ups or change its instructions while it runs, call subagent again with this sessionID.",
@@ -45,7 +45,7 @@ export const Input = Schema.Struct({
   }),
   output: Schema.optionalKey(Schema.Array(SubagentOutput.Field)).annotate({
     description:
-      "Fields you need back from the subagent. Set this when you will act on the answer rather than read it: the subagent is told to end with a JSON object carrying exactly these fields, and its <subagent> message reports an error with what it said if it does not, instead of handing you prose to guess at.",
+      'Fields you need back from the subagent. Set this when you will act on the answer rather than read it: the subagent is told to end with a JSON object carrying exactly these fields, and its <background-result kind="subagent"> message reports an error with what it said if it does not, instead of handing you prose to guess at.',
   }),
 })
 
@@ -56,7 +56,7 @@ export const Output = Schema.Struct({
 })
 export const description = [
   "Spawns an agent in a child session to work on the specified task.",
-  "Subagents always run in the background: the call returns immediately with a sessionID, and you receive a `<subagent>` message each time the child goes idle, including after later work.",
+  'Subagents always run in the background: the call returns immediately with a sessionID, and you receive a `<background-result kind="subagent">` message each time the child goes idle, including after later work.',
   "Keep working on non-overlapping tasks, or briefly tell the user what you launched and end your response. Do not sleep, poll, or proactively check on the child's progress.",
   "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
   "Pass the returned sessionID to continue that specific child conversation. A follow-up to a running child joins its current run.",
@@ -89,7 +89,7 @@ export const ParallelOutput = Schema.Struct({
 })
 
 export const parallelDescription = [
-  `Starts 2-${PARALLEL_LIMIT} independent subtasks at once, each in its own subagent session running in the background, and returns their sessionIDs. Each one sends you a <subagent> message when it goes idle.`,
+  `Starts 2-${PARALLEL_LIMIT} independent subtasks at once, each in its own subagent session running in the background, and returns their sessionIDs. Each one sends you a <background-result kind="subagent"> message when it goes idle.`,
   `Use it instead of ${name} when a task splits into parts that do not depend on each other: the wall-clock time is roughly the longest subtask instead of the sum.`,
   "Each subtask starts with a fresh context, so give each a self-contained prompt that says exactly what to do and what to return.",
   "Do not run subtasks that write to the same files: parallel edits to shared files conflict.",
