@@ -49,11 +49,21 @@ export const WindowSetTrafficLightsPosition = Rpc.make("WindowSetTrafficLightsPo
   payload: { x: Schema.Number, y: Schema.Number },
 })
 
+export const WindowSetTaskbarBadge = Rpc.make("WindowSetTaskbarBadge", {
+  payload: { count: Schema.Int, description: Schema.String },
+})
+
 export const WindowRequestAttention = Rpc.make("WindowRequestAttention")
 
 export const WindowSetTaskbarProgress = Rpc.make("WindowSetTaskbarProgress", {
   payload: { mode: Schema.Literals(["none", "indeterminate", "paused", "error"]) },
 })
+
+export const WindowShowToast = Rpc.make("WindowShowToast", {
+  payload: { tag: Schema.String, title: Schema.String, body: Schema.String },
+})
+
+export const WindowDismissToast = Rpc.make("WindowDismissToast", { payload: { tag: Schema.String } })
 
 export const WindowRpcs = RpcGroup.make(
   WindowRequestAttention,
@@ -72,5 +82,8 @@ export const WindowRpcs = RpcGroup.make(
   WindowSetPinchZoomEnabled,
   WindowSetTitlebar,
   WindowSetTrafficLightsPosition,
+  WindowSetTaskbarBadge,
   WindowSetTaskbarProgress,
+  WindowShowToast,
+  WindowDismissToast,
 )

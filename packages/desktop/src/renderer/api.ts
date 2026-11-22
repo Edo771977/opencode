@@ -21,6 +21,7 @@ export const api: ElectronAPI = {
   awaitInitialization: () => invoke("AppAwaitInitialization"),
   reconnectService: (signal) => cancellable("AppReconnectService", undefined, signal),
   onSidecarChanged: (cb) => listen("SidecarChanged", (event) => cb({ url: event.url })),
+  onSystemResumed: (cb) => listen("SystemResumed", () => cb()),
   readyDeepLinks: () => send("AppReadyDeepLinks"),
   acknowledgeDeepLinks: (attempt) => send("AppAcknowledgeDeepLinks", { attempt }),
   isFirstLaunchOnboardingPending: () => invoke("AppIsFirstLaunchOnboardingPending"),
@@ -56,6 +57,7 @@ export const api: ElectronAPI = {
   openBrowser: (url) => invoke("FilesOpenBrowser", { url }),
   openPath: (path, app) => invoke("FilesOpenPath", { path, application: app }).then((value) => value ?? undefined),
   revealPath: (path) => invoke("FilesRevealPath", { path }),
+  startFileDrag: (path) => invoke("FilesStartDrag", { path }),
   readClipboardImage: () =>
     invoke("FilesReadClipboardImage").then((image) =>
       image ? { ...image, buffer: toArrayBuffer(image.buffer) } : null,
@@ -69,6 +71,9 @@ export const api: ElectronAPI = {
   onWindowFullscreenChanged: (cb) => listen("WindowFullscreenChanged", (event) => cb(event.fullscreen)),
   setWindowFocus: () => invoke("WindowSetFocus"),
   showWindow: () => invoke("WindowShow"),
+  showToast: (toast) => invoke("WindowShowToast", toast),
+  dismissToast: (tag) => invoke("WindowDismissToast", { tag }),
+  onToastActivated: (cb) => listen("ToastActivated", (event) => cb(event.tag)),
   relaunch: () => send("AppRelaunch"),
   getZoomFactor: () => invoke("WindowGetZoomFactor"),
   setZoomFactor: (factor) => invoke("WindowSetZoomFactor", { factor }),
@@ -80,6 +85,7 @@ export const api: ElectronAPI = {
   onZoomChanged: (cb) => listen("WindowZoomChanged", (event) => cb({ factor: event.factor, level: event.level })),
   setTitlebar: (theme) => invoke("WindowSetTitlebar", { theme }),
   setTrafficLightsPosition: (position) => invoke("WindowSetTrafficLightsPosition", position),
+  setTaskbarBadge: (count, description) => invoke("WindowSetTaskbarBadge", { count, description }),
   setTaskbarProgress: (mode) => invoke("WindowSetTaskbarProgress", { mode }),
   runDesktopMenuAction: (action) => invoke("MenuRunAction", { action }),
   setBackgroundColor: (color) => invoke("AppSetBackgroundColor", { color }),
