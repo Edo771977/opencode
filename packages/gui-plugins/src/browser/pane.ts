@@ -9,7 +9,7 @@ import { HttpClient, HttpClientRequest } from "effect/http"
 import type { BuiltinMainStorage } from "@opencode/plugin/gui/builtin"
 import type { Embeds, Log, Persisted, ServerEndpoints, Windows } from "@opencode/plugin/gui/main"
 import { createBrowserPage, type BrowserPage, type Shared } from "./chromium"
-import { browserFailure, CodedError, missingArtifact, PageEndedError, pageReports } from "./errors"
+import { browserFailure, CodedError, keepsOpenedTab, missingArtifact, PageEndedError, pageReports } from "./errors"
 import { createBrowserNetwork, createDirectNetwork, type BrowserNetwork } from "./network"
 import { activityOwner, agentDriven, agentTabShow, agentRefusal, childActivity, createdActivity, destinationOrigin, normalizeURL, recordPageInput, recordTabFocus, refusal, restoreRefusal, type TabActivity } from "./policy"
 import type { Profile } from "./profile"
@@ -77,6 +77,8 @@ type Handle = {
   cleanup: () => void
   timer?: ReturnType<typeof setTimeout>
   network?: BrowserNetwork
+  /** A remote server's partition: what a page waits for before it loads, while the sign-ins are first copied into it. */
+  signedIn?: (signal: AbortSignal) => Promise<void> | undefined
   sendState?: (state: Browser.State) => void
   /** Pages by attempt. */
   pages: Map<number, BrowserPage>
@@ -118,6 +120,8 @@ export function createBrowserPane(input: {
   readonly system: SystemMedia
   /** Whether the build offers the device toolbar. */
   readonly toolbar: boolean
+  /** How long a page's `navigate` command waits for its load; `NAVIGATION_DEADLINE_MS` unless given. */
+  readonly navigationDeadlineMs?: number
   /** The plugin instance's file verifier, for workspace files. */
   readonly verifier: HandlePath
   /** The desktop log, which hears why a page ended or stalled (page-log.ts). */
@@ -302,12 +306,17 @@ export function createBrowserPane(input: {
 
             if (!shared) {
               handle.network = yield* createBrowserNetwork({ rpc, attachment, location: options.location, partition })
+
               // Only when the user chose to share sign-ins with remote servers do they carry over, both ways, so a page
               // of a remote server is signed in where the profile is; otherwise `link` leaves the partition apart.
-              yield* Effect.acquireRelease(
-                Effect.promise(() => input.profile.link(electron.session.fromPartition(partition))),
-                (unlink) => Effect.sync(unlink),
+              // The attachment does not wait for the first copy of the sign-ins: only a page that is about to load
+              // does (`signedIn`). A registration that ends, for any reason, ends its copy with the scope.
+              const linked = yield* Effect.acquireRelease(
+                Effect.sync(() => input.profile.link(electron.session.fromPartition(partition))),
+                (link) => Effect.sync(link.unlink),
               )
+
+              handle.signedIn = linked.signedIn
             }
 
             const connected = yield* Deferred.make<void>()
@@ -562,6 +571,8 @@ export function createBrowserPane(input: {
 
       if (reason) throw new Error(reason)
 
+      if (command.type === "navigate") dispatchBinding(binding, { type: "tab.addressed", tabID: command.tabID })
+
       if ("tabID" in command && command.type !== "tabs.focus") page(binding, command.tabID)?.personCommand()
       const closing = command.type === "tabs.close" ? page(binding, command.tabID) : undefined
 
@@ -683,7 +694,14 @@ export function createBrowserPane(input: {
       return handle.registered.resolve()
     }
 
-    if (effect.type === "emit") return emit(effect.binding, effect.event)
+    if (effect.type === "emit") {
+      // A binding's last state says why it closed. The window lists no tab of a session another window took or the
+      // server lacks, so the log names the reason, and how many tabs the window keeps for its next registration.
+      if (effect.event.type === "state")
+        input.log.write("info", "browser pane closed", { session: handle.session, reason: effect.event.error, kept: effect.event.state?.tabs.length ?? 0 })
+
+      return emit(effect.binding, effect.event)
+    }
 
     if (effect.type === "report") {
       emit(effect.binding, effect.event)
@@ -807,6 +825,8 @@ export function createBrowserPane(input: {
       readonly opener?: Browser.TabID
       /** Shows the opener's tab why an address this tab was opened for could not open. */
       readonly refused?: (url: string) => void
+      /** The tab whose page or link opened this one, which it stands next to, and whether it takes the pane. */
+      readonly beside?: { readonly tabID: Browser.TabID; readonly front: boolean }
     } = {},
   ) {
     const entry = selectBinding(machine.state, binding)
@@ -866,7 +886,9 @@ export function createBrowserPane(input: {
       artifacts: handle.artifacts?.(),
       remote: remoteSource(binding),
       local: handle.shared,
-      waitForFilters: handle.shared ? input.profile.waitForFilters : undefined,
+      // What a web page waits for before its load is issued: in the profile its content filters, in a remote server's
+      // partition the first copy of the sign-ins, so a restored tab opens signed in.
+      waitForFilters: handle.shared ? input.profile.waitForFilters : (url, signal) => (/^https?:\/\//i.test(url) ? handle.signedIn?.(signal) : undefined),
       signal: handle.abort.signal,
       extensions: () => extensions(binding),
       shared,
@@ -878,7 +900,7 @@ export function createBrowserPane(input: {
 
           if (current()) await execute(binding, { action, files: [] }, handle.abort.signal, "user")
         },
-        open: async (url, background) => { if (current()) await execute(binding, { action: { type: "tabs.open", url, ...(background && { focus: false }) }, files: [] }, handle.abort.signal, "user", "new", childActivity(activity)) },
+        open: async (url, background) => { if (current()) await execute(binding, { action: { type: "tabs.open", url, ...(background && { focus: false }) }, files: [] }, handle.abort.signal, "user", "new", { activity: childActivity(activity), beside: id }) },
         verifier: input.verifier,
       },
       embeds: input.embeds,
@@ -921,6 +943,7 @@ export function createBrowserPane(input: {
       },
       zoomed: () => handles.get(binding)?.pages.forEach((page) => page.detail()),
       toolbar: input.toolbar,
+      navigationDeadlineMs: input.navigationDeadlineMs,
       shortcut: (shortcut) => {
         if (!focused() || win.isDestroyed()) return
         page.focusHost()
@@ -933,9 +956,11 @@ export function createBrowserPane(input: {
         if (handle.shared) input.profile.extensionTabs.hidden(page.contents.id)
       },
       popup: (popupOptions, background, activity, refused) => {
-        const popup = create(binding, { initialize: false, popupOptions, activity, opener: id, refused })
+        const agent = activityOwner(activity) === "agent"
+        // The person's tab stands beside this one. The agent's goes to the end, as its own tabs do.
+        const popup = create(binding, { initialize: false, popupOptions, activity, opener: id, refused, beside: agent ? undefined : { tabID: id, front: !background } })
 
-        if (activityOwner(activity) === "agent") {
+        if (agent) {
           announce(binding, popup.state().id, "none", !background)
 
           return popup.contents
@@ -968,7 +993,7 @@ export function createBrowserPane(input: {
     }))
     downloads.set(page.contents.id, page.download)
     input.profile.permissions.set(page.contents.id, page.permissions)
-    dispatchBinding(binding, { type: "tab.opened", tabID: id, attempt, tab: options.restore ?? page.state() })
+    dispatchBinding(binding, { type: "tab.opened", tabID: id, attempt, tab: options.restore ?? page.state(), beside: options.beside })
     // Straight to the window, not through the server report: the embed is local to this desktop.
     emit(binding, { type: "embed", tabID: id, embed: page.embed })
     // A page that does not become ready reports that itself, through `fail`.
@@ -1015,7 +1040,7 @@ export function createBrowserPane(input: {
           new AbortController().signal,
           "user",
           "new",
-          page.childActivity(),
+          { activity: page.childActivity() },
         )
 
         const created = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Struct({ id: Browser.TabID }))(opened.value))
@@ -1054,12 +1079,40 @@ export function createBrowserPane(input: {
     dispatchBinding(binding, { type: "tab.published", tabID, attempt, tab: page.state() })
   }
 
-  async function execute(binding: string, command: Browser.Command, signal: AbortSignal, origin: "agent" | "user", intent: "present" | "new" = "new", inherited?: TabActivity, created?: (id: Browser.TabID) => void): Promise<Browser.Result> {
+  async function execute(binding: string, command: Browser.Command, signal: AbortSignal, origin: "agent" | "user", intent: "present" | "new" = "new", from?: { readonly activity: TabActivity; readonly beside?: Browser.TabID }, created?: (id: Browser.TabID) => void): Promise<Browser.Result> {
     const action = command.action
 
     const present = (tabID: Browser.TabID, reveal: "none" | "tab" = "none", active = true) => {
       if (origin === "user") return dispatchBinding(binding, { type: "tab.focused", tabID })
       announce(binding, tabID, reveal, active)
+    }
+
+    // The first load of a tab this command made or shows a file in. A tab that stays (`keepsOpenedTab`) is an ordinary
+    // tab from here on, whatever its load came to: its command goes on as for one that loaded, so the tab is reported,
+    // shown as asked, and held by whoever opened it. Returns why the load did not finish, if it did not. Any other
+    // failure is thrown, and undoes a tab the command made.
+    const firstLoad = (tab: BrowserPage, tabID: Browser.TabID, url: string) =>
+      tab.execute({ action: { type: "navigate", tabID, url }, files: [] }, signal, origin).then(
+        () => undefined,
+        (error: Error) => {
+          if (!keepsOpenedTab(error, origin)) throw error
+
+          return error
+        },
+      )
+
+    // The person's tab says by itself that its page still loads or failed. The agent is told, with the tab to go on
+    // with: its open made a tab, though it has no page to answer with yet.
+    const stillLoading = (unfinished: Error | undefined, tabID: Browser.TabID) => {
+      if (unfinished && origin === "agent")
+        throw new Error(`${unfinished.message} The tab stays open as ${tabID}: use that tabID with browser.wait, browser.reload or browser.tabs.close, and do not open the address again.`, { cause: unfinished })
+    }
+
+    // Undoes a tab this command made and could show no page in. The log names it: no person and no close tool did.
+    const rollback = (tabID: Browser.TabID, opened: BrowserPage) => {
+      if (page(binding, tabID) !== opened) return
+      input.log.write("warn", "browser tab closed: its open failed", { session: handles.get(binding)?.session, action: action.type, origin })
+      dispatchBinding(binding, { type: "tab.closed", tabID })
     }
 
     const acquire = (id: Browser.TabID) => {
@@ -1111,12 +1164,13 @@ export function createBrowserPane(input: {
         using opening = new DisposableStack()
         const tabID = tab.state().id
 
-        if (!existing) opening.defer(() => { if (page(binding, tabID) === tab) dispatchBinding(binding, { type: "tab.closed", tabID }) })
-        await tab.execute({ action: { type: "navigate", tabID, url }, files: [] }, signal, origin)
+        if (!existing) opening.defer(() => rollback(tabID, tab))
+        const unfinished = await firstLoad(tab, tabID, url)
         refresh(binding, tabID, tab)
         // A workspace file is opened to show it to the person: it takes the pane even when another tab is selected there.
         present(tabID, "tab")
         opening.move()
+        stillLoading(unfinished, tabID)
 
         return { value: { path: action.path, tabID, url: tab.state().url, tab: tab.state() }, files: [] }
       }
@@ -1160,14 +1214,19 @@ export function createBrowserPane(input: {
         }
       }
 
-      const opened = create(binding, { activity: createdActivity(origin, inherited) })
+      // A tab a page's own link or menu opened stands next to that page's tab; any other goes to the end.
+      const opened = create(binding, {
+        activity: createdActivity(origin, from?.activity),
+        beside: from?.beside === undefined ? undefined : { tabID: from.beside, front: action.focus !== false },
+      })
+
       const tabID = opened.state().id
       const shown = agentTabShow(action)
 
       if (origin === "agent" && shown.background) handles.get(binding)?.background.add(tabID)
       created?.(tabID)
       using opening = new DisposableStack()
-      opening.defer(() => { if (page(binding, tabID) === opened) dispatchBinding(binding, { type: "tab.closed", tabID }) })
+      opening.defer(() => rollback(tabID, opened))
 
       if (file) openingFiles.set(opened, file)
 
@@ -1177,12 +1236,12 @@ export function createBrowserPane(input: {
         await opened.ready
 
         // A new page already loads about:blank, so only another address needs a navigation.
-        if (action.url !== undefined)
-          await opened.execute({ action: { type: "navigate", tabID, url: action.url }, files: [] }, signal, origin)
+        const unfinished = action.url === undefined ? undefined : await firstLoad(opened, tabID, action.url)
         refresh(binding, tabID, opened)
 
         if (origin === "agent") present(tabID, shown.reveal, action.focus !== false)
         opening.move()
+        stillLoading(unfinished, tabID)
 
         return { value: opened.state(), files: [] }
       } finally {
