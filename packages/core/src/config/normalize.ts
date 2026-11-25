@@ -155,7 +155,19 @@ export function normalize(input: unknown): Result {
     canonical(ConfigAgent.Info, ConfigMigrateV1.migrateAgent({ ...value, mode: "primary" })),
   )
   const migratedAgents = mergeMaps(legacyAgents, modeAgents, ["agents"], diagnostics, input.mode)
-  const nativeAgents = decodeMap(input.agents, ConfigAgent.Info, ["agents"], diagnostics, decodeEncoded)
+  const nativeAgents = decodeMap(
+    isRecord(input.agents)
+      ? mapValues(input.agents, (agent) =>
+          isRecord(agent) && agent.permissions !== undefined
+            ? { ...agent, permissions: renameTools(agent.permissions) }
+            : agent,
+        )
+      : input.agents,
+    ConfigAgent.Info,
+    ["agents"],
+    diagnostics,
+    decodeEncoded,
+  )
   diagnoseAgentUnsupported(input.agent, ["agent"], diagnostics)
   diagnoseAgentUnsupported(input.mode, ["mode"], diagnostics)
   mergeMap(
@@ -183,7 +195,7 @@ export function normalize(input: unknown): Result {
   const permissions = [
     ...migrateTools(input.tools, diagnostics),
     ...migratePermissions(input.permission, diagnostics),
-    ...nativePermissions(input.permissions, diagnostics),
+    ...nativePermissions(renameTools(input.permissions), diagnostics),
   ]
   if (permissions.length || Array.isArray(input.permissions)) encoded.permissions = permissions
 
@@ -551,6 +563,16 @@ function migrateTools(value: unknown, diagnostics: Diagnostic[]) {
     if (typeof raw !== "boolean") return denyUnreadable(action, "*", ["tools", key], diagnostics)
     return { action, resource: "*", effect: raw ? "allow" : "deny" }
   })
+}
+
+// Native rules may still name the media tools by their old experimental names.
+function renameTools(rules: unknown) {
+  if (!Array.isArray(rules)) return rules
+  return rules.map((rule) =>
+    isRecord(rule) && typeof rule.action === "string"
+      ? { ...rule, action: ConfigMigrateV1.renamedTool(rule.action) }
+      : rule,
+  )
 }
 
 function migratePermissions(value: unknown, diagnostics: Diagnostic[]) {
