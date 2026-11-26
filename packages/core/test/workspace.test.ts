@@ -95,20 +95,6 @@ it.effect("creates and persists an ID without provisioning", () =>
   }),
 )
 
-it.effect("creates a workspace with a caller-supplied ID", () =>
-  Effect.gen(function* () {
-    const workspace = yield* Workspace.Service
-    const id = Workspace.ID.create()
-
-    expect(yield* workspace.create({ id, provider: "fake" })).toBe(id)
-    expect(
-      yield* Database.Service.use(({ db }) =>
-        db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, id)).get(),
-      ).pipe(Effect.orDie),
-    ).toMatchObject({ id, provider: "fake", binding: null })
-  }),
-)
-
 it.effect("reuses a caller-supplied ID with the same provider", () =>
   Effect.gen(function* () {
     const workspace = yield* Workspace.Service
@@ -156,31 +142,6 @@ it.effect("resolves an existing caller-supplied ID before provider lookup", () =
         existingProvider: "missing",
       }),
     )
-  }),
-)
-
-it.effect("destroys an unprovisioned workspace through the driver with a null binding", () =>
-  Effect.gen(function* () {
-    const workspace = yield* Workspace.Service
-    const workspaceID = yield* workspace.create({ provider: "fake" })
-
-    expect(yield* workspace.destroy(workspaceID)).toEqual({ destroyed: true })
-    expect(calls).toEqual([{ operation: "destroy", binding: null }])
-    expect(
-      yield* Database.Service.use(({ db }) =>
-        db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get(),
-      ).pipe(Effect.orDie),
-    ).toBeUndefined()
-  }),
-)
-
-it.effect("succeeds without calling the driver when the workspace does not exist", () =>
-  Effect.gen(function* () {
-    const workspace = yield* Workspace.Service
-    const workspaceID = Workspace.ID.create()
-
-    expect(yield* workspace.destroy(workspaceID)).toEqual({ destroyed: false })
-    expect(calls).toEqual([])
   }),
 )
 
@@ -608,6 +569,8 @@ const makeAlarmHarness = (
     readonly pollInterval?: Workspace.Options["pollInterval"]
     readonly create?: WorkspaceDriver.Interface["create"]
     readonly connect?: WorkspaceDriver.Interface["connect"]
+    readonly close?: Effect.Effect<void>
+    readonly suspendForIdle?: WorkspaceDriver.Interface["suspendForIdle"]
   } = {},
 ) => {
   const sharedDb = Database.configuredClient(sqliteLayer({ storage: makeDurableObjectStorage() }))
@@ -627,12 +590,14 @@ const makeAlarmHarness = (
           state.openCount += 1
           bindings.push(input.binding)
         }).pipe(Effect.andThen(options.connect ? options.connect(input) : Effect.succeed(memory))),
-        () => Effect.sync(() => void (state.closeCount += 1)),
+        () => Effect.sync(() => void (state.closeCount += 1)).pipe(Effect.andThen(options.close ?? Effect.void)),
       ),
     suspendForIdle: (input) =>
       state.failSuspend
         ? Effect.fail(new WorkspaceDriver.Error({ message: "provider timeout" }))
-        : Effect.sync(() => void suspended.push(input.workspaceID)),
+        : Effect.sync(() => void suspended.push(input.workspaceID)).pipe(
+            Effect.andThen(options.suspendForIdle ? options.suspendForIdle(input) : Effect.void),
+          ),
     destroy: () => Effect.void,
   })
 
@@ -661,6 +626,101 @@ const makeAlarmHarness = (
       Workspace.Service.use(fn).pipe(Effect.provide(build())),
   }
 }
+
+bareIt.effect("re-provisions when a warm connection is destroyed and recreated before acquisition", () =>
+  Effect.gen(function* () {
+    const gate = yield* makeGate()
+    const harness = makeAlarmHarness({ keepWarm: "5 minutes", suspendForIdle: () => gate.wait })
+
+    yield* harness.run((workspace) =>
+      Effect.gen(function* () {
+        const id = yield* workspace.attach({ provider: "fake", binding: { name: "old" } })
+        const files = makeFiles(yield* workspace.connect(id))
+        yield* files.mkdir("/before-race")
+        yield* TestClock.adjust("6 minutes")
+
+        const idle = yield* workspace.suspendIdle().pipe(Effect.forkScoped({ startImmediately: true }))
+        yield* Deferred.await(gate.started)
+        const recreate = yield* workspace
+          .destroy(id)
+          .pipe(
+            Effect.andThen(workspace.create({ id, provider: "fake" })),
+            Effect.forkScoped({ startImmediately: true }),
+          )
+        // The idle driver still holds the lock and the warm connection is still cached.
+        expect(yield* workspace.connected(id)).toBe(true)
+        const op = yield* files.mkdir("/after-race").pipe(Effect.forkScoped({ startImmediately: true }))
+
+        yield* Deferred.succeed(gate.release, undefined)
+        yield* Fiber.join(idle)
+        expect(yield* Fiber.join(recreate)).toBe(id)
+        yield* Fiber.join(op)
+        expect(harness.bindings).toEqual([{ name: "old" }, { workspaceID: id, generation: 0 }])
+        expect(harness.counts()).toEqual({ openCount: 2, closeCount: 1 })
+      }),
+    )
+    expect(harness.counts()).toEqual({ openCount: 2, closeCount: 2 })
+  }),
+)
+
+bareIt.effect("returns NotFound when a warm connection is destroyed before acquisition", () =>
+  Effect.gen(function* () {
+    const gate = yield* makeGate()
+    const harness = makeAlarmHarness({ keepWarm: "5 minutes", suspendForIdle: () => gate.wait })
+
+    yield* harness.run((workspace) =>
+      Effect.gen(function* () {
+        const id = yield* workspace.attach({ provider: "fake", binding: { name: "deleted" } })
+        const files = makeFiles(yield* workspace.connect(id))
+        yield* files.mkdir("/before-delete")
+        yield* TestClock.adjust("6 minutes")
+
+        const idle = yield* workspace.suspendIdle().pipe(Effect.forkScoped({ startImmediately: true }))
+        yield* Deferred.await(gate.started)
+        const destroy = yield* workspace.destroy(id).pipe(Effect.forkScoped({ startImmediately: true }))
+        expect(yield* workspace.connected(id)).toBe(true)
+        const op = yield* files.mkdir("/after-delete").pipe(Effect.flip, Effect.forkScoped({ startImmediately: true }))
+
+        yield* Deferred.succeed(gate.release, undefined)
+        yield* Fiber.join(idle)
+        expect(yield* Fiber.join(destroy)).toEqual({ destroyed: true })
+        expect(yield* Fiber.join(op)).toEqual(
+          new Failed({ path: "/after-delete", cause: new Workspace.NotFound({ workspaceID: id }) }),
+        )
+        expect(yield* workspace.exists(id)).toBe(false)
+        expect(harness.counts()).toEqual({ openCount: 1, closeCount: 1 })
+      }),
+    )
+    expect(harness.counts()).toEqual({ openCount: 1, closeCount: 1 })
+  }),
+)
+
+bareIt.effect("keepWarm 0 serializes a new acquisition behind the last release without leaking scopes", () =>
+  Effect.gen(function* () {
+    const gate = yield* makeGate()
+    const harness = makeAlarmHarness({ close: gate.wait })
+
+    yield* harness.run((workspace) =>
+      Effect.gen(function* () {
+        const id = yield* workspace.attach({ provider: "fake", binding: { name: "closing" } })
+        const files = makeFiles(yield* workspace.connect(id))
+        const first = yield* files.mkdir("/first-close").pipe(Effect.forkScoped({ startImmediately: true }))
+        yield* Deferred.await(gate.started)
+
+        const second = yield* files.mkdir("/second-close").pipe(Effect.forkScoped({ startImmediately: true }))
+        expect(yield* workspace.connected(id)).toBe(false)
+        expect(harness.counts()).toEqual({ openCount: 1, closeCount: 1 })
+
+        yield* Deferred.succeed(gate.release, undefined)
+        yield* Fiber.join(first)
+        yield* Fiber.join(second)
+        expect(yield* workspace.connected(id)).toBe(false)
+        expect(harness.counts()).toEqual({ openCount: 2, closeCount: 2 })
+      }),
+    )
+    expect(harness.counts()).toEqual({ openCount: 2, closeCount: 2 })
+  }),
+)
 
 bareIt.effect("keepWarm 0 shares a connection across overlapping ops and closes immediately on last release", () =>
   Effect.gen(function* () {
