@@ -31,10 +31,19 @@ import { useData } from "../context"
 import { useSources } from "../context/sources"
 import { turnSources } from "../sources/sources"
 import { SessionReadToolGroup, SessionUserMessage } from "../message/current-message"
-import { FileChangeRuns, fileRuns, runDisclosureKey, ScriptChanges, taskAgentName } from "../tools/tool-renderer"
+import {
+  FileChangeRuns,
+  fileRuns,
+  runDisclosureKey,
+  ScriptChanges,
+  ScriptOutputProvider,
+  taskAgentName,
+  type ScriptOutputPlacement,
+} from "../tools/tool-renderer"
 import { SessionRetry } from "../components/session-retry"
 import { SessionError } from "../components/session-error"
 import type { TimelineDetail } from "../timeline/detail"
+import { scriptOutputLayout } from "../timeline/script-output"
 import { TimelineRow, type PartRef } from "../timeline/timeline-row"
 import { userMessageRuns, userRunSpring } from "../timeline/user-runs"
 import { IDLE_TURN_PHASE, sameRef, viewTurnPhase } from "../timeline/turn-phase-machine"
@@ -441,6 +450,39 @@ export function createNextTimelineRowRenderer(input: {
       )
     }
 
+    if (row().group.type === "thought") {
+      const parts = createMemo(() => {
+        const group = row().group
+
+        if (group.type !== "thought") return []
+        const contents = indexGroupContents(group.refs)
+
+        return group.refs.flatMap((ref) => {
+          const content = contents.get(ref.messageID)?.get(ref.partID)
+
+          return content?.type === "reasoning" ? [{ ...content, id: ref.partID }] : []
+        })
+      })
+
+      // Opening the thoughts is remembered by the first one, as it was while they were live.
+      const key = () => {
+        const group = row().group
+
+        return group.type === "thought" ? group.refs[0]!.partID : group.key
+      }
+
+      return (
+        <ThoughtRow
+          parts={parts()}
+          streaming={false}
+          defaultOpen={thoughtOpens(input.timelineDetail(), false)}
+          open={input.disclosure.value(key())}
+          onOpenChange={(open) => input.disclosure.set(key(), open)}
+          onContentRendered={onSizeChange}
+        />
+      )
+    }
+
     if (row().group.type === "events" || row().group.type === "subagent") {
       const events = createMemo(() => {
         const group = row().group
@@ -754,10 +796,22 @@ export function createNextTimelineRowRenderer(input: {
 
   // Each row's only space is the gap below it, which sets the row below apart. A message joining the user's message
   // above sits its run's 4 px below it instead, which its turn gap springs to.
+  const following = createMemo(() => {
+    const rows = input.projection.rows()
+
+    return new Map(rows.map((row, index) => [TimelineRow.key(row), rows[index + 1]] as const))
+  })
+
+  // Blocks stand a step further apart than a script stands from its own changes, which keep the small gap.
   const gap = (row: TimelineRow.TimelineRow) => {
     if (Predicate.isTagged(row, "TurnGap") && runs().get(row.userMessageID)?.above) return undefined
+    const value = gaps().get(TimelineRow.key(row))
+    const next = following().get(TimelineRow.key(row))
 
-    return gaps().get(TimelineRow.key(row))
+    if (value !== "s" || !Predicate.isTagged(row, "AssistantPart") || (next && TimelineRow.scriptChanges(next)))
+      return value
+
+    return "m"
   }
 
   const Frame = (props: { row: FramedTimelineRow; grow?: boolean; children: JSX.Element }) => (
@@ -1339,31 +1393,36 @@ export function createNextTimelineRowRenderer(input: {
         return value
       }
 
-      const content = createMemo(() => {
-        const ref = current().ref
-        const content = resolveContent(input.projection.messageByID().get(ref.messageID), ref.partID)
+      const parts = createMemo(() => {
+        const streaming = phase(current().userMessageID).streamingReasoningRef
 
-        return content?.type === "reasoning" ? content : undefined
+        return [...(current().before ?? []), current().ref].flatMap((ref) => {
+          const content = resolveContent(input.projection.messageByID().get(ref.messageID), ref.partID)
+
+          return content?.type === "reasoning"
+            ? [{ ...content, id: ref.partID, streaming: sameRef(streaming, ref) }]
+            : []
+        })
       })
 
-      // The live thought stands in for the status line. It streams in view, and the row it settles into starts closed.
+      const disclosureKey = () => (current().before?.[0] ?? current().ref).partID
+
+      // The live thought stands in for the status line, with the thoughts it follows. It reads as Thinking until
+      // something else shows, and the row it settles into starts closed.
 
       return (
         <Frame row={current()}>
           <div data-slot="session-turn-message-container" class={`w-full ${padding()}`}>
             <div data-slot="session-turn-thinking-row" data-live-slot="">
-              <Show when={content()}>
-                {(content) => (
-                  <ThoughtRow
-                    id={current().ref.partID}
-                    content={content()}
-                    streaming
-                    defaultOpen={thoughtOpens(input.timelineDetail(), true)}
-                    open={input.disclosure.value(current().ref.partID) ?? thoughtOpens(input.timelineDetail(), true)}
-                    onOpenChange={(open) => input.disclosure.set(current().ref.partID, open)}
-                    onContentRendered={onSizeChange}
-                  />
-                )}
+              <Show when={parts().length > 0}>
+                <ThoughtRow
+                  parts={parts()}
+                  streaming
+                  defaultOpen={thoughtOpens(input.timelineDetail(), true)}
+                  open={input.disclosure.value(disclosureKey()) ?? thoughtOpens(input.timelineDetail(), true)}
+                  onOpenChange={(open) => input.disclosure.set(disclosureKey(), open)}
+                  onContentRendered={onSizeChange}
+                />
               </Show>
             </div>
           </div>
@@ -1563,11 +1622,23 @@ export function createNextTimelineRowRenderer(input: {
     )
   }
 
+  // Where each script's Output row goes, from the rows: after its changes when they are drawn right after it.
+  const scriptOutput = createMemo(() =>
+    scriptOutputLayout(input.projection.rows(), input.projection.messageByID(), data.flag("full_codemode")),
+  )
+
+  const scriptPlacement: ScriptOutputPlacement = {
+    afterChanges: (partID) => scriptOutput().afterChanges.has(partID),
+    outputAfter: (fileID) => scriptOutput().outputAfter.get(fileID),
+  }
+
   function Row(props: { row: Accessor<TimelineRow.TimelineRow>; onSizeChange?: () => void }) {
     return (
-      <Show when={TimelineRow.key(props.row())} keyed>
-        {(_key) => render(props.row, props.onSizeChange)}
-      </Show>
+      <ScriptOutputProvider value={scriptPlacement}>
+        <Show when={TimelineRow.key(props.row())} keyed>
+          {(_key) => render(props.row, props.onSizeChange)}
+        </Show>
+      </ScriptOutputProvider>
     )
   }
 
